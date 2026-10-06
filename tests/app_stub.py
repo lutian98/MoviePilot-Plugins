@@ -12,6 +12,7 @@ import sys
 import types
 from enum import Enum
 from pathlib import Path
+from typing import Any, Dict
 
 PLUGIN_PATH = Path(__file__).resolve().parents[1] / "plugins.v3" / "embysyncdel" / "__init__.py"
 
@@ -110,6 +111,53 @@ class _EventManager:
 
 eventmanager = _EventManager()
 
+# 跨插件共享数据：仿真辅种（IYUUAutoSeed）/ 转种（TorrentTransfer）等插件写入的数据
+PLUGIN_DATA: Dict[tuple, Any] = {}
+
+
+def reset() -> None:
+    """
+    清空仿真环境，保证用例之间互不影响。
+
+    注意：不清空事件注册表 —— 那是插件模块导入期的注册结果，属于全局状态。
+    """
+    PLUGIN_DATA.clear()
+    logger.records.clear()
+
+
+class FakeChain:
+    """插件处理链桩：记录被删除 / 暂停的种子，替代真实下载器操作。"""
+
+    def __init__(self):
+        self.removed = []
+        self.stopped = []
+
+    def remove_torrents(self, hashs, delete_file=True, downloader=None):
+        self.removed.append({"hashs": hashs, "delete_file": delete_file, "downloader": downloader})
+        return True
+
+    def stop_torrents(self, hashs, downloader=None):
+        self.stopped.append({"hashs": hashs, "downloader": downloader})
+        return True
+
+
+class FakeDownloadFile:
+    """下载记录桩。"""
+
+    def __init__(self, downloader):
+        self.downloader = downloader
+
+
+class FakeDownloadHistoryOper:
+    """下载记录操作桩：按种子 Hash 反查所属下载器。"""
+
+    def __init__(self, mapping=None):
+        self.mapping = mapping or {}
+
+    def get_files_by_hash(self, download_hash):
+        downloader = self.mapping.get(download_hash)
+        return [FakeDownloadFile(downloader)] if downloader else []
+
 
 class Event:
     """事件桩。"""
@@ -153,21 +201,19 @@ class _PluginBase:
 
     def __init__(self):
         self.chain = None
-        self._data = {}
         self._config = {}
         self.messages = []
 
-    # --- 数据存取 ---
+    # --- 数据存取（跨插件数据用 PLUGIN_DATA 共享，便于仿真辅种/转种插件） ---
     def save_data(self, key, value):
-        self._data[key] = value
+        PLUGIN_DATA[(self.__class__.__name__, key)] = value
 
     def get_data(self, key=None, plugin_id=None):
-        if plugin_id and plugin_id != self.__class__.__name__:
-            return None
-        return self._data.get(key)
+        owner = plugin_id or self.__class__.__name__
+        return PLUGIN_DATA.get((owner, key))
 
     def del_data(self, key=None):
-        self._data.pop(key, None)
+        PLUGIN_DATA.pop((self.__class__.__name__, key), None)
 
     def update_config(self, config):
         self._config = dict(config or {})
@@ -285,6 +331,7 @@ def install():
     _module("app.sdk.events", Event=Event, eventmanager=eventmanager)
     _module("app.sdk.logging", logger=logger)
     _module("app.sdk.media", resolve_media_identity=resolve_media_identity)
+    _module("app.sdk.plugin", _PluginBase=_PluginBase)
     _module(
         "app.sdk.services",
         DownloaderHelper=DownloaderHelper,
@@ -294,11 +341,17 @@ def install():
 
 
 def load_plugin():
-    """加载插件模块（自动先装桩）。"""
+    """
+    加载插件模块。
+
+    按官方测试约定使用与生产一致的 ``app.plugins.<plugin_id>`` 模块名导入源码，
+    避免同一插件以两个模块名加载而重复执行注册副作用。
+    """
     import importlib.util
 
     install()
-    spec = importlib.util.spec_from_file_location("embysyncdel", PLUGIN_PATH)
+    spec = importlib.util.spec_from_file_location("app.plugins.embysyncdel", PLUGIN_PATH)
     module = importlib.util.module_from_spec(spec)
+    sys.modules["app.plugins.embysyncdel"] = module
     spec.loader.exec_module(module)
     return module

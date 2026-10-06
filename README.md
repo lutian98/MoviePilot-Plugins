@@ -124,13 +124,18 @@ MoviePilot /api/v1/webhook
 
 ### 开发与测试
 
-插件核心逻辑（事件名过滤、路径映射、后缀无关匹配、演练流程、防误删护栏）与宿主解耦，可在没有 MoviePilot 的环境直接跑测试：
+插件核心逻辑（事件名过滤、路径映射、后缀无关匹配、演练流程、防误删护栏、删除链路）
+与宿主解耦，可在没有 MoviePilot 的环境直接跑测试：
 
 ```bash
-python -m unittest discover -s tests -t .   # 或 pytest
+python -m unittest discover -s tests/v3 -t .   # 或 pytest tests/v3
+python .github/scripts/check_plugin_versions.py  # 索引与代码版本一致性
 ```
 
-测试通过 `tests/app_stub.py` 桩掉宿主 `app.*` 模块，因此不需要安装 MoviePilot。
+- 测试位于 `tests/v3/embysyncdel/`（官方约定：不要放进插件源码目录）。
+- `tests/app_stub.py` 用最小实现桩掉宿主 `app.*`，因此不需要安装 MoviePilot。
+- `test_e2e_sandbox.py` 在真实临时目录上仿真「媒体服务器媒体库 + MoviePilot 媒体库 +
+  保种目录」，跑通完整删除链路，并验证同目录其它影片毫发无损。
 
 ### 致谢
 

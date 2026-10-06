@@ -21,11 +21,14 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: 语法检查
+      - name: 语法编译检查
         run: python -m compileall -q plugins.v3
 
-      - name: 单元测试
-        run: python -m unittest discover -s tests -t . -v
+      - name: 索引与插件版本一致性
+        run: python .github/scripts/check_plugin_versions.py
 
-      - name: 插件清单检查
-        run: python -c "import json;[print(k,'ok') for k in json.load(open('package.v3.json'))]"
+      - name: 空白符检查
+        run: git diff --check
+
+      - name: 单元测试（含端到端沙箱）
+        run: python -m unittest discover -s tests/v3 -t . -v

@@ -28,13 +28,13 @@ from typing import Any, Dict, List, Optional, Tuple
 from app import schemas
 from app.db.oper.downloadhistory import DownloadHistoryOper
 from app.db.oper.transferhistory import TransferHistoryOper
-from app.plugins import _PluginBase
 from app.schemas.query import QueryPageRequest, TransferHistoryFilter
 from app.schemas.types import EventType, MediaSource, MessageType
 from app.sdk.config import settings
 from app.sdk.events import Event, eventmanager
 from app.sdk.logging import logger
 from app.sdk.media import resolve_media_identity
+from app.sdk.plugin import _PluginBase
 from app.sdk.services import DownloaderHelper, MediaServerIdentityHelper
 
 
@@ -185,8 +185,8 @@ class EmbySyncDel(_PluginBase):
     plugin_name = "Emby 联动删除"
     # 插件描述
     plugin_desc = "Emby 删除影片后同步清理整理记录、源文件、媒体库文件与下载任务；兼容 strm / 软链接媒体库。"
-    # 插件图标
-    plugin_icon = "https://raw.githubusercontent.com/lutian98/moviepilot-plugins/main/icons/embysyncdel.png"
+    # 插件图标（放在仓库 icons/ 目录，填文件名即可）
+    plugin_icon = "embysyncdel.png"
     # 插件版本
     plugin_version = "1.0.0"
     # 插件作者
@@ -285,37 +285,36 @@ class EmbySyncDel(_PluginBase):
         """退出插件（本插件无常驻服务）。"""
         pass
 
-    def get_command(self) -> Optional[List[Dict[str, Any]]]:
+    @staticmethod
+    def get_command() -> List[Dict[str, Any]]:
         """本插件不提供远程命令。"""
-        return None
+        return []
 
     def get_api(self) -> List[Dict[str, Any]]:
-        """插件 API：查询历史、清空历史。"""
+        """注册插件 API：查询历史、清空历史（鉴权由宿主按 auth 声明处理）。"""
         return [
             {
                 "path": "/history",
                 "endpoint": self.api_history,
                 "methods": ["GET"],
+                "auth": "apikey",
                 "summary": "查询联动删除历史",
             },
             {
                 "path": "/delete_history",
                 "endpoint": self.api_delete_history,
                 "methods": ["GET"],
+                "auth": "apikey",
                 "summary": "清空联动删除历史",
             },
         ]
 
-    def api_history(self, key: str = "") -> schemas.Response:
-        """查询执行历史（需 API_TOKEN）。"""
-        if key != settings.API_TOKEN:
-            return schemas.Response(success=False, message="API密钥错误")
+    def api_history(self) -> schemas.Response:
+        """查询执行历史。"""
         return schemas.Response(success=True, data=self.get_data("history") or [])
 
-    def api_delete_history(self, key: str = "") -> schemas.Response:
-        """清空执行历史（需 API_TOKEN）。"""
-        if key != settings.API_TOKEN:
-            return schemas.Response(success=False, message="API密钥错误")
+    def api_delete_history(self) -> schemas.Response:
+        """清空执行历史。"""
         self.save_data("history", [])
         return schemas.Response(success=True, message="已清空")
 
