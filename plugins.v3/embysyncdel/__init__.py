@@ -984,7 +984,7 @@ class EmbySyncDel(_PluginBase):
     @staticmethod
     def _fallback_image() -> str:
         """默认通知图片。"""
-        return "https://raw.githubusercontent.com/lutian98/moviepilot-plugins/main/icons/embysyncdel.png"
+        return "https://raw.githubusercontent.com/lutian98/MoviePilot-Plugins/main/icons/embysyncdel.png"
 
     def _append_history(
             self, media_name: str, media_id: str, results: List[str], error_cnt: int

@@ -39,7 +39,7 @@
 MoviePilot → 设定 → 插件市场 → 右上角「插件仓库」→ 添加：
 
 ```
-https://github.com/lutian98/moviepilot-plugins
+https://github.com/lutian98/MoviePilot-Plugins
 ```
 
 保存后刷新市场，搜索「Emby 联动删除」并安装。
