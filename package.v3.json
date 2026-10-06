@@ -7,7 +7,7 @@
     "icon": "embysyncdel.png",
     "author": "lutian98",
     "level": 1,
-    "release": false,
+    "release": true,
     "system_version": ">=3.0.0",
     "history": {
       "v1.0.0": "首次发布：事件名可配置、媒体身份三级兜底、后缀无关匹配（strm 媒体库可用）、演练模式默认开启、整理记录与源文件/媒体库文件/转种/辅种联动清理。"
