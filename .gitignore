@@ -13,3 +13,6 @@ htmlcov/
 .DS_Store
 Thumbs.db
 *.log
+
+# CI 工作流推送需要 GitHub token 具备 workflow scope；补上权限后删除本行即可纳入版本管理
+.github/workflows/
