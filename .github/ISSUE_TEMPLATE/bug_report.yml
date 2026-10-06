@@ -1,0 +1,62 @@
+name: 问题反馈
+description: 报告 Bug 或使用问题
+title: "[问题] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。请尽量填写完整信息，尤其是日志与通知内容 —— 多数问题出在路径映射或事件名配置上。
+  - type: input
+    id: mp-version
+    attributes:
+      label: MoviePilot 版本
+      placeholder: v3.0.9
+    validations:
+      required: true
+  - type: input
+    id: plugin-version
+    attributes:
+      label: 插件版本
+      placeholder: v1.0.0
+    validations:
+      required: true
+  - type: input
+    id: media-server
+    attributes:
+      label: 媒体服务器与版本
+      placeholder: Emby 4.8.x / Webhooks 插件版本
+    validations:
+      required: true
+  - type: dropdown
+    id: library-type
+    attributes:
+      label: 媒体库类型
+      options:
+        - strm / 软链接
+        - 真实文件（直接存放媒体文件）
+        - 其他 / 不确定
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: 相关配置
+      description: 事件名、路径映射（可脱敏）、是否开启演练模式、下载任务处理方式
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志与通知内容
+      description: MoviePilot 日志中与「联动删除」相关的行，以及插件发出的通知原文
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望结果与实际结果
+    validations:
+      required: true

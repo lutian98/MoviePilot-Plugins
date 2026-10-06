@@ -1,0 +1,31 @@
+name: 测试
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: 单元测试 (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: 语法检查
+        run: python -m compileall -q plugins.v3
+
+      - name: 单元测试
+        run: python -m unittest discover -s tests -t . -v
+
+      - name: 插件清单检查
+        run: python -c "import json;[print(k,'ok') for k in json.load(open('package.v3.json'))]"
