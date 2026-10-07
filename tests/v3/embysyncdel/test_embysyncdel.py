@@ -372,5 +372,64 @@ class TestLazyGuards(unittest.TestCase):
         self.assertIn(app_stub.EventType.WebhookMessage, app_stub.eventmanager.handlers)
 
 
+class TestDirectWebhookApi(unittest.TestCase):
+    """直投 webhook 入口（媒体服务器把 JSON 直接投给插件）—— 本插件独立工作的关键路径。"""
+
+    def _instance(self, records=None):
+        instance, notifies = build_plugin(records)
+        instance._webhook_key = "k123"
+        return instance, notifies
+
+    def test_rejects_wrong_key(self):
+        instance, notifies = self._instance()
+        out = instance.api_emby_webhook({"Event": "library.deleted"}, key="bad")
+        self.assertFalse(out["ok"])
+        self.assertEqual(notifies, [])
+
+    def test_rejects_empty_body(self):
+        instance, _ = self._instance()
+        self.assertFalse(instance.api_emby_webhook({}, key="k123")["ok"])
+        self.assertFalse(instance.api_emby_webhook(None, key="k123")["ok"])
+        self.assertFalse(instance.api_emby_webhook({"Item": {"Name": "x"}}, key="k123")["ok"])
+
+    def test_accepts_and_cleans_up(self):
+        """Emby 真实报文形状（JSON body、无 ProviderIds）应能命中并按路径清理。"""
+        record_dest = ("/downloads/link/Movie/中国电影/微微一笑很倾城 (2016)/"
+                       "微微一笑很倾城 (2016) - 1080p.mkv")
+        instance, notifies = self._instance([FakeRecord(20597, "微微一笑很倾城", record_dest)])
+        payload = {
+            "Event": "library.deleted",
+            "Item": {
+                "Type": "Movie",
+                "Name": "微微一笑很倾城",
+                "ProductionYear": 2016,
+                "Path": "/mnt/user/Media/Strm/Media/Movie/中国电影/微微一笑很倾城 (2016)/"
+                        "微微一笑很倾城 (2016) - 1080p.strm",
+            },
+        }
+        out = instance.api_emby_webhook(payload, key="k123")
+        self.assertTrue(out["ok"])
+        # 处理在后台线程，等它跑完
+        for _ in range(100):
+            if notifies:
+                break
+            import time as _t
+            _t.sleep(0.05)
+        self.assertEqual(len(notifies), 1)
+        self.assertIn("将删除 1 项", notifies[0]["title"])
+
+    def test_provider_ids_used_when_present(self):
+        """报文带 ProviderIds 时应取到 tmdb 身份（不再依赖路径兜底）。"""
+        instance, _ = self._instance()
+        data = instance._event_data_from_payload({
+            "Event": "library.deleted",
+            "Item": {"Type": "Movie", "Name": "某片", "ProductionYear": 2016,
+                     "ProviderIds": {"Tmdb": "12345"}},
+        })
+        self.assertEqual(str(data.media_id), "12345")
+        self.assertEqual(data.item_name, "某片 (2016)")
+        self.assertEqual(data.event, "library.deleted")
+
+
 if __name__ == "__main__":
     unittest.main()
