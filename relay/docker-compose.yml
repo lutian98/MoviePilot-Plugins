@@ -1,0 +1,23 @@
+services:
+  mp-webhook-relay:
+    image: python:3.12-alpine
+    container_name: mp-webhook-relay
+    restart: unless-stopped
+    # 只用标准库，直接把脚本挂进去跑，无需构建镜像
+    command: ["python3", "/app/mp_emby_webhook_relay.py"]
+    volumes:
+      - ./mp_emby_webhook_relay.py:/app/mp_emby_webhook_relay.py:ro
+    ports:
+      - "9432:9432"
+    environment:
+      # MoviePilot 地址（容器里访问宿主机上的 MP：host.docker.internal 或宿主机内网 IP）
+      MP_BASE: "http://host.docker.internal:3000"
+      # MP → 设置 → API Token
+      MP_TOKEN: "在这里填 MoviePilot 的 API Token"
+      # 必须与 MP 里的媒体服务器名称完全一致（区分大小写），例如 Emby
+      SOURCE: "Emby"
+      LISTEN_PORT: "9432"
+      # 可选：给 webhook 加一个共享密钥，Emby 侧地址写 .../emby?key=xxx
+      # URL_KEY: "change-me"
+      # 可选：设为 1 则转发全部事件（默认只转发删除类）
+      # FORWARD_ALL: "0"
