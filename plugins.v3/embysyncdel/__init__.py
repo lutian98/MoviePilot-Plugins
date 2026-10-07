@@ -191,7 +191,7 @@ class EmbySyncDel(_PluginBase):
     # 插件图标（放在仓库 icons/ 目录，填文件名即可）
     plugin_icon = "embysyncdel.png"
     # 插件版本
-    plugin_version = "1.1.0"
+    plugin_version = "1.1.1"
     # 插件作者
     plugin_author = "lutian98"
     # 作者主页
@@ -364,6 +364,13 @@ class EmbySyncDel(_PluginBase):
         if not getattr(event_data, "event", ""):
             self._record_event("api_rejected", "直投 webhook 报文缺少 Event 字段", "")
             return {"ok": False, "msg": "no event"}
+        # 标记来源，便于在历史里区分「媒体服务器直投」与「宿主事件」
+        self._record_event(
+            "api_received",
+            f"收到媒体服务器直投事件：{event_data.event}",
+            getattr(event_data, "item_name", ""),
+            getattr(event_data, "media_id", "") or "",
+        )
 
         def _run() -> None:
             try:
