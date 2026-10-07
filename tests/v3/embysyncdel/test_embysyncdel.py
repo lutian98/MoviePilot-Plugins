@@ -262,15 +262,26 @@ class TestWebhookFlow(unittest.TestCase):
         self.assertIn(record_dest, notifies[0]["text"])
         self.assertEqual(instance._transferhis.deleted, [])
 
-    def test_no_identity_notifies_and_aborts(self):
-        """媒体身份缺失时必须放弃并发告警，绝不按标题猜。"""
-        instance, notifies = build_plugin([FakeRecord(1, "某片", "/downloads/link/a.mkv")])
+    def test_no_identity_falls_back_to_path(self):
+        """事件缺媒体身份时不再直接放弃：改用路径匹配；路径对不上照样放弃，绝不按标题猜。"""
+        instance, notifies = build_plugin([FakeRecord(1, "某片", "/downloads/link/a.mp4")])
         event = make_event(media_id=None, provider_ids=None)
         event.media_source = None
         instance.sync_del_by_webhook(app_stub.Event(event_data=event))
         self.assertEqual(len(notifies), 1)
-        self.assertIn("未能识别媒体身份", notifies[0]["text"])
+        self.assertIn("未找到匹配的整理记录", notifies[0]["text"])
         self.assertEqual(instance._transferhis.deleted, [])
+
+    def test_no_identity_path_match_still_works(self):
+        """缺身份但路径能对上时，仍然正常命中并出清单（真实 Emby 报文的主要形态）。"""
+        record_dest = ("/downloads/link/Movie/中国电影/微微一笑很倾城 (2016)/"
+                       "微微一笑很倾城 (2016) - 1080p.mkv")
+        instance, notifies = build_plugin([FakeRecord(20597, "微微一笑很倾城", record_dest)])
+        event = make_event(media_id=None, provider_ids=None)
+        event.media_source = None
+        instance.sync_del_by_webhook(app_stub.Event(event_data=event))
+        self.assertEqual(len(notifies), 1)
+        self.assertIn("将删除 1 项", notifies[0]["title"])
 
     def test_identity_from_provider_ids(self):
         """事件没带身份时，用报文的 ProviderIds 兜底。"""

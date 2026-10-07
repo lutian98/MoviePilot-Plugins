@@ -188,7 +188,7 @@ class EmbySyncDel(_PluginBase):
     # 插件图标（放在仓库 icons/ 目录，填文件名即可）
     plugin_icon = "embysyncdel.png"
     # 插件版本
-    plugin_version = "1.0.2"
+    plugin_version = "1.0.3"
     # 插件作者
     plugin_author = "lutian98"
     # 作者主页
@@ -591,18 +591,17 @@ class EmbySyncDel(_PluginBase):
             if provider_ids:
                 media_source, media_id = MediaServerIdentityHelper.from_provider_ids(provider_ids)
         if not media_source or not media_id:
-            message = (
-                f"联动删除失败：{media_name} 未能识别媒体身份（缺来源或原生 ID）。"
-                f"请确认媒体服务器已刮削该媒体，或媒体库路径映射是否配置正确。"
+            # 2026-10-07：真实媒体服务器（Emby）的删除报文常常不带 ProviderIds，
+            # 此时**不再直接放弃**：只要有可映射的路径，就按「路径 + 标题守卫」匹配整理记录；
+            # 仍然要求匹配唯一，不唯一照样放弃并告警。
+            logger.info(
+                f"联动删除：{media_name} 事件未带媒体身份，改用媒体路径匹配：{media_path}"
             )
-            logger.error(message)
-            self._record_event("identity_failed", message, media_name)
-            self._notify_result(
-                title="⚠️ 联动删除未执行",
-                text=message,
-                image=self._fallback_image(),
+            self._record_event(
+                "no_identity",
+                f"事件未带媒体身份（缺来源/原生 ID），改用媒体路径匹配：{media_path}",
+                media_name,
             )
-            return
 
         self._sync_del(
             media_name=media_name,
