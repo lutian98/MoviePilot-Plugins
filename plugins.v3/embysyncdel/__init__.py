@@ -188,7 +188,7 @@ class EmbySyncDel(_PluginBase):
     # 插件图标（放在仓库 icons/ 目录，填文件名即可）
     plugin_icon = "embysyncdel.png"
     # 插件版本
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.1"
     # 插件作者
     plugin_author = "lutian98"
     # 作者主页
@@ -546,19 +546,32 @@ class EmbySyncDel(_PluginBase):
 
         event_type = str(event_data.event or "")
         allowed = parse_event_types(self._event_types)
-        if not event_type or event_type not in allowed:
-            return
-
         media_name = str(event_data.item_name or "").strip()
         media_path = str(event_data.item_path or "").replace("\\", "/")
         media_type = str(event_data.media_type or event_data.item_type or "")
+        self._record_event(
+            "received",
+            f"事件={event_type or '(空)'}；媒体类型={media_type or '(空)'}；名称={media_name or '(空)'}；"
+            f"路径={media_path or '(空)'}",
+            media_name=media_name,
+        )
+        if not event_type or event_type not in allowed:
+            self._record_event(
+                "ignored",
+                f"事件名不在监听列表（收到 {event_type or '(空)'}，监听 {self._event_types}）",
+                media_name,
+            )
+            return
+
         if not media_path:
             logger.warning(f"联动删除：事件缺少媒体路径，已忽略（{media_name}）")
+            self._record_event("ignored", "事件缺少媒体路径", media_name)
             return
 
         # 排除路径
         if self._excluded(media_path):
             logger.info(f"联动删除：媒体路径 {media_path} 命中排除规则，已跳过")
+            self._record_event("ignored", f"路径命中排除规则：{media_path}", media_name)
             return
 
         # 媒体身份：事件自带 → 报文提供方 ID 兜底
@@ -573,6 +586,7 @@ class EmbySyncDel(_PluginBase):
                 f"请确认媒体服务器已刮削该媒体，或媒体库路径映射是否配置正确。"
             )
             logger.error(message)
+            self._record_event("identity_failed", message, media_name)
             self._notify_result(
                 title="⚠️ 联动删除未执行",
                 text=message,
@@ -621,6 +635,7 @@ class EmbySyncDel(_PluginBase):
                 f"请检查媒体库路径映射是否正确（媒体服务器路径#MoviePilot路径）。"
             )
             logger.warning(message)
+            self._record_event("no_record", message, media_name, media_id)
             self._notify_result(title="⚠️ 联动删除未找到整理记录", text=message,
                                 image=self._fallback_image())
             return
@@ -651,6 +666,16 @@ class EmbySyncDel(_PluginBase):
                 mtype=MessageType.Plugin,
             )
             logger.info(f"联动删除（演练）：{media_name} 命中 {len(plan)} 条整理记录")
+            self._append_history(
+                media_name,
+                media_id,
+                [f"🧪 演练：将删除 {len(plan)} 项（未执行任何删除）"]
+                + [
+                    f"• {item['title']}（记录 {item['id']}）库文件：{item['dest']}；源文件：{item['src']}"
+                    for item in plan
+                ],
+                0,
+            )
             return
 
         for record in records:
@@ -986,6 +1011,29 @@ class EmbySyncDel(_PluginBase):
         """默认通知图片。"""
         return "https://raw.githubusercontent.com/lutian98/MoviePilot-Plugins/main/icons/embysyncdel.png"
 
+    def _record_event(
+            self, stage: str, detail: str, media_name: str = "", media_id: str = ""
+    ) -> None:
+        """记录一次联动删除事件的阶段结果（审计用）。
+
+        任何一个阶段都会留痕，便于排查「事件是否到达 / 为何跳过」。
+        """
+        try:
+            history = self.get_data("history") or []
+            if not isinstance(history, list):
+                history = []
+            history.append({
+                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "stage": stage,
+                "name": media_name,
+                "media_id": media_id,
+                "detail": [detail] if detail else [],
+                "error": 0,
+            })
+            self.save_data("history", history[-MAX_HISTORY:])
+        except Exception as err:  # noqa: BLE001
+            logger.error(f"联动删除：写入审计记录失败：{err}")
+
     def _append_history(
             self, media_name: str, media_id: str, results: List[str], error_cnt: int
     ) -> None:
@@ -996,6 +1044,7 @@ class EmbySyncDel(_PluginBase):
                 history = []
             history.append({
                 "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "stage": "done",
                 "name": media_name,
                 "media_id": media_id,
                 "detail": results,
