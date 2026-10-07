@@ -21,12 +21,13 @@ plugin = app_stub.load_plugin()
 class FakeRecord:
     """整理记录桩。"""
 
-    def __init__(self, rid, title, dest, src=None, download_hash=None):
+    def __init__(self, rid, title, dest, src=None, download_hash=None, image=None):
         self.id = rid
         self.title = title
         self.dest = dest
         self.src = src
         self.download_hash = download_hash
+        self.image = image
         self.date = None
 
 
@@ -429,6 +430,51 @@ class TestDirectWebhookApi(unittest.TestCase):
         self.assertEqual(str(data.media_id), "12345")
         self.assertEqual(data.item_name, "某片 (2016)")
         self.assertEqual(data.event, "library.deleted")
+
+
+class TestNotificationImage(unittest.TestCase):
+    """通知配图：优先用整理记录自带海报（老插件的做法），没有才用兜底图标。"""
+
+    def test_poster_from_record(self):
+        poster = "https://image.tmdb.org/t/p/w500/abc123.jpg"
+        instance, _ = build_plugin([FakeRecord(1, "某片", "/x/某片.mkv", image=poster)])
+        self.assertEqual(instance._poster_image([FakeRecord(1, "某片", "/x/某片.mkv", image=poster)]), poster)
+
+    def test_fallback_when_no_image(self):
+        instance, _ = build_plugin([FakeRecord(1, "某片", "/x/某片.mkv")])
+        self.assertEqual(
+            instance._poster_image([FakeRecord(1, "某片", "/x/某片.mkv")]),
+            plugin.EmbySyncDel._fallback_image(),
+        )
+
+    def test_fallback_on_bad_url(self):
+        """非 http(s) 的值（例如本地相对路径）不予采用，避免通知里出现无效图。"""
+        instance, _ = build_plugin()
+        self.assertEqual(
+            instance._poster_image([FakeRecord(1, "某片", "/x/某片.mkv", image="/local/poster.jpg")]),
+            plugin.EmbySyncDel._fallback_image(),
+        )
+
+    def test_notification_carries_poster(self):
+        """端到端：演练通知的图片应是海报而不是兜底图标。"""
+        poster = "https://image.tmdb.org/t/p/w500/xyz.jpg"
+        rec = FakeRecord(20597, "微微一笑很倾城", "/downloads/link/Movie/中国电影/微微一笑很倾城 (2016)/某片.mkv",
+                         image=poster)
+        instance, notifies = build_plugin([rec])
+        instance._webhook_key = "k123"
+        payload = {
+            "Event": "library.deleted",
+            "Item": {"Type": "Movie", "Name": "微微一笑很倾城", "ProductionYear": 2016,
+                     "Path": "/mnt/user/Media/Strm/Media/Movie/中国电影/微微一笑很倾城 (2016)/某片.strm"},
+        }
+        self.assertTrue(instance.api_emby_webhook(payload, key="k123")["ok"])
+        import time as _t
+        for _ in range(100):
+            if notifies:
+                break
+            _t.sleep(0.05)
+        self.assertEqual(len(notifies), 1)
+        self.assertEqual(notifies[0].get("image"), poster)
 
 
 if __name__ == "__main__":

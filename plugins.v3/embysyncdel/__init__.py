@@ -191,7 +191,7 @@ class EmbySyncDel(_PluginBase):
     # 插件图标（放在仓库 icons/ 目录，填文件名即可）
     plugin_icon = "embysyncdel.png"
     # 插件版本
-    plugin_version = "1.1.1"
+    plugin_version = "1.2.0"
     # 插件作者
     plugin_author = "lutian98"
     # 作者主页
@@ -805,7 +805,7 @@ class EmbySyncDel(_PluginBase):
             self._notify_result(
                 title=f"🧪 演练：{media_name} 将删除 {len(plan)} 项",
                 text=f"{text}\n\n当前为演练模式，未执行任何删除。核对无误后请在插件配置中关闭「演练模式」。",
-                image=self._fallback_image(),
+                image=self._poster_image(records),
                 mtype=MessageType.Plugin,
             )
             logger.info(f"联动删除（演练）：{media_name} 命中 {len(plan)} 条整理记录")
@@ -846,7 +846,7 @@ class EmbySyncDel(_PluginBase):
             self._notify_result(
                 title=f"{head} 联动删除完成：{media_name}",
                 text=f"{body}\n\n成功处理 {len(records) - error_cnt} 条，失败 {error_cnt} 条。",
-                image=self._fallback_image(),
+                image=self._poster_image(records),
                 mtype=MessageType.Plugin,
             )
 
@@ -1151,8 +1151,21 @@ class EmbySyncDel(_PluginBase):
 
     @staticmethod
     def _fallback_image() -> str:
-        """默认通知图片。"""
+        """默认通知图片（整理记录里没有海报时用）。"""
         return "https://raw.githubusercontent.com/lutian98/MoviePilot-Plugins/main/icons/embysyncdel.png"
+
+    @staticmethod
+    def _poster_image(records: Any) -> str:
+        """取通知配图：优先用整理记录自带的海报，其次兜底图标。
+
+        整理记录（transferhistory）自带 image 字段，MP 在整理入库时就把海报存进去了，
+        比再去 TMDB 查一次更稳、更省事。
+        """
+        for record in records or []:
+            image = getattr(record, "image", None)
+            if image and isinstance(image, str) and image.startswith(("http://", "https://")):
+                return image
+        return EmbySyncDel._fallback_image()
 
     def _record_event(
             self, stage: str, detail: str, media_name: str = "", media_id: str = ""
