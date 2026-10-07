@@ -188,7 +188,7 @@ class EmbySyncDel(_PluginBase):
     # 插件图标（放在仓库 icons/ 目录，填文件名即可）
     plugin_icon = "embysyncdel.png"
     # 插件版本
-    plugin_version = "1.0.1"
+    plugin_version = "1.0.2"
     # 插件作者
     plugin_author = "lutian98"
     # 作者主页
@@ -537,7 +537,17 @@ class EmbySyncDel(_PluginBase):
 
     @eventmanager.register(EventType.WebhookMessage)
     def sync_del_by_webhook(self, event: Event) -> None:
-        """媒体服务器删除事件 → 同步清理。"""
+        """媒体服务器删除事件 → 同步清理（外层兜底：异常也留痕）。"""
+        try:
+            self._handle_webhook_event(event)
+        except Exception as err:  # noqa: BLE001 - 兜底留痕，避免事件处理异常静默丢失
+            logger.error(f"联动删除：处理 webhook 事件异常：{err}")
+            self._record_event(
+                "error", f"处理事件异常：{type(err).__name__}: {err}"
+            )
+
+    def _handle_webhook_event(self, event: Event) -> None:
+        """解析事件并执行清理。"""
         if not self._enabled or not event:
             return
         event_data: schemas.WebhookEventInfo = event.event_data
