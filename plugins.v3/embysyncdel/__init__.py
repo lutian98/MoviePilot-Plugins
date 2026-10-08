@@ -43,6 +43,12 @@ from app.sdk.services import DownloaderHelper, MediaServerIdentityHelper
 
 # 默认接受的事件名（Emby 各版本 / 各通知插件使用的删除事件名并不统一）
 DEFAULT_EVENT_TYPES = "library.deleted,ItemDeleted,item.deleted"
+
+# 容器级条目类型：这些事件指的是「文件夹 / 剧集容器」，不是具体影片文件。
+# 实测这类事件大量来自整理换版重建与其它媒体库的清理动作，按目录名匹配极易误删仍在库里的影片。
+CONTAINER_ITEM_TYPES = {
+    "folder", "series", "season", "collectionfolder", "boxset", "collection",
+}
 # 下载任务处理方式
 ACTION_DELETE = "delete"
 ACTION_STOP = "stop"
@@ -141,9 +147,12 @@ def same_media(record_dest: Optional[str], event_path: Optional[str], is_tv: boo
         return dest.stem == target.stem
     if dest.stem == target.stem:
         return True
-    # 事件上报的是影片目录（而非具体文件）时，记录里的文件正位于该目录下
-    if dest.parent == target:
-        return True
+    # 同目录下的不同命名变体（整理记录里的文件名与媒体库文件名不完全一致时）。
+    #
+    # 这里刻意**不**做「事件路径是目录就直接命中该目录下记录」的匹配：
+    # 实测生产日志 633 条 Movie 型删除事件全部是文件路径（0 条目录路径），
+    # 而目录型路径恰恰来自整理换版重建（Emby 先报"文件夹被删"、随后影片又被加回来），
+    # 一旦按目录命中就会把仍在库里的影片连源文件一起删掉，且不可逆。宁可漏清、不可误删。
     return dest.parent == target.parent
 
 
@@ -191,7 +200,7 @@ class EmbySyncDel(_PluginBase):
     # 插件图标（放在仓库 icons/ 目录，填文件名即可）
     plugin_icon = "embysyncdel.png"
     # 插件版本
-    plugin_version = "1.2.0"
+    plugin_version = "1.3.0"
     # 插件作者
     plugin_author = "lutian98"
     # 作者主页
@@ -710,6 +719,26 @@ class EmbySyncDel(_PluginBase):
         if not media_path:
             logger.warning(f"联动删除：事件缺少媒体路径，已忽略（{media_name}）")
             self._record_event("ignored", "事件缺少媒体路径", media_name)
+            return
+
+        # 容器级事件（文件夹 / 剧集容器）默认不处理。
+        #
+        # 实测（2026-10-08，Emby 生产环境）：
+        # - library.deleted 里 Folder 型占一半（614 条），来源是「整理换版重建」和其它媒体库的清理动作；
+        #   典型样本：08:42:26 入库 → 09:02:59 报「文件夹被删」→ 09:03:19 影片又被加回来 —— 影片其实一直在库里。
+        # - 这类事件没有影片文件名，靠目录名匹配整理记录极易把**仍在库里的影片**连源文件一起删掉，且不可逆。
+        # 因此默认拒绝，只留痕；确实需要处理这类事件的（例如整目录级删除）再显式打开开关。
+        container_type = media_type.strip().lower()
+        if container_type in CONTAINER_ITEM_TYPES:
+            logger.info(
+                f"联动删除：容器级事件（{media_type}）默认不处理，已跳过：{media_path}"
+            )
+            self._record_event(
+                "skipped_container",
+                f"容器级事件（{media_type}）默认不处理：{media_path}"
+                f"（该事件多为整理重建或其它库清理，据目录名匹配会误删仍在库里的影片，故一律不处理）",
+                media_name,
+            )
             return
 
         # 排除路径

@@ -181,11 +181,16 @@ class TestSameMedia(unittest.TestCase):
         event = "/downloads/link/Movie/中国电影/某片 (2016)/某片 (2016) - 1080p.strm"
         self.assertTrue(plugin.same_media(record, event, is_tv=False))
 
-    def test_event_reports_movie_directory(self):
-        """媒体服务器上报影片目录而不是文件时也要能匹配。"""
+    def test_directory_path_event_does_not_match(self):
+        """事件路径是「目录」时**不得**命中该目录下的记录。
+
+        依据（2026-10-08 实测生产日志）：633 条 Movie 型删除事件全部带文件后缀，0 条目录路径；
+        而目录路径恰好来自整理换版重建 —— Emby 先报「文件夹被删」、20 秒后影片又被加回来，
+        影片其实一直在库里。靠目录名命中记录会把仍在库的影片连源文件一起删掉且不可逆。
+        """
         record = "/downloads/link/Movie/中国电影/某片 (2016)/某片 (2016) - 1080p.mkv"
         event = "/downloads/link/Movie/中国电影/某片 (2016)"
-        self.assertTrue(plugin.same_media(record, event, is_tv=False))
+        self.assertFalse(plugin.same_media(record, event, is_tv=False))
 
     def test_different_movie_not_matched(self):
         record = "/downloads/link/Movie/中国电影/某片 (2016)/某片 (2016) - 1080p.mkv"
@@ -475,6 +480,95 @@ class TestNotificationImage(unittest.TestCase):
             _t.sleep(0.05)
         self.assertEqual(len(notifies), 1)
         self.assertEqual(notifies[0].get("image"), poster)
+
+
+class TestContainerEventGuard(unittest.TestCase):
+    """容器级事件（文件夹/剧集容器）默认必须拒绝处理。
+
+    生产事故样本（2026-10-08）：Emby 在整理换版时先报「文件夹被删」、20 秒后影片又被加回来，
+    影片其实一直在库里；若按目录名匹配到整理记录就删，会把仍在库的影片连源文件一起删（不可逆）。
+    """
+
+    FOLDER_PAYLOAD = {
+        "Event": "library.deleted",
+        "Item": {"Type": "Folder", "Name": "马戏之王 (2017)",
+                 "Path": "/mnt/user/Media/Strm/Media/Movie/欧美电影/马戏之王 (2017)"},
+    }
+
+    def test_folder_event_is_skipped(self):
+        rec = FakeRecord(99001, "马戏之王",
+                         "/downloads/link/Movie/欧美电影/马戏之王 (2017)/马戏之王 (2017) - 1080p.mkv")
+        instance, notifies = build_plugin([rec])
+        instance.save_data("history", [])          # 清掉其它用例留下的历史
+        instance._webhook_key = "k"
+        instance._dry_run = False          # 即使是真实删除模式，也必须拒绝
+        out = instance.api_emby_webhook(self.FOLDER_PAYLOAD, key="k")
+        self.assertTrue(out["ok"])          # 收下事件，但不处理
+        import time as _t
+        _t.sleep(0.6)
+        self.assertEqual(notifies, [])      # 不打扰用户
+        stages = [x.get("stage") for x in (instance.get_data("history") or [])]
+        self.assertIn("skipped_container", stages)
+        self.assertNotIn("done", stages)    # 绝不执行删除
+        self.assertEqual(instance._transferhis.deleted, [])
+
+    def test_series_container_also_skipped(self):
+        instance, notifies = build_plugin()
+        instance.save_data("history", [])
+        instance._webhook_key = "k"
+        payload = {"Event": "library.deleted",
+                   "Item": {"Type": "Series", "Name": "某剧", "Path": "/mnt/user/Media/Strm/Media/TV/某剧"}}
+        self.assertTrue(instance.api_emby_webhook(payload, key="k")["ok"])
+        import time as _t
+        _t.sleep(0.6)
+        stages = [x.get("stage") for x in (instance.get_data("history") or [])]
+        self.assertIn("skipped_container", stages)
+
+    def test_movie_type_event_with_directory_path_does_not_match(self):
+        """纵深防御：即使事件自称 Movie，只要路径是「目录」就不能按目录级规则命中记录。
+
+        整理换版重建时 Emby 可能报出这类报文；若命中就会把仍在库里的影片删掉。
+        """
+        rec = FakeRecord(99004, "马戏之王",
+                         "/downloads/link/Movie/欧美电影/马戏之王 (2017)/马戏之王 (2017) - 1080p.mkv")
+        instance, notifies = build_plugin([rec])
+        instance.save_data("history", [])
+        instance._webhook_key = "k"
+        payload = {"Event": "library.deleted",
+                   "Item": {"Type": "Movie", "Name": "马戏之王 (2017)",
+                            "Path": "/mnt/user/Media/Strm/Media/Movie/欧美电影/马戏之王 (2017)"}}
+        self.assertTrue(instance.api_emby_webhook(payload, key="k")["ok"])
+        import time as _t
+        for _ in range(60):
+            if notifies:
+                break
+            _t.sleep(0.05)
+        # 不删除，只告警（Movie 型事件匹配不到记录时提醒用户，这类事件生产环境极少见）
+        self.assertEqual(len(notifies), 1)
+        self.assertIn("未找到整理记录", notifies[0]["title"])
+        self.assertEqual(instance._transferhis.deleted, [])
+        stages = [x.get("stage") for x in (instance.get_data("history") or [])]
+        self.assertIn("no_record", stages)
+
+    def test_movie_event_still_processed(self):
+        """回归：影片文件级事件不受影响，照常处理。"""
+        rec = FakeRecord(99003, "马戏之王",
+                         "/downloads/link/Movie/欧美电影/马戏之王 (2017)/马戏之王 (2017) - 1080p.mkv")
+        instance, notifies = build_plugin([rec])
+        instance.save_data("history", [])
+        instance._webhook_key = "k"
+        payload = {"Event": "library.deleted",
+                   "Item": {"Type": "Movie", "Name": "马戏之王", "ProductionYear": 2017,
+                            "Path": "/mnt/user/Media/Strm/Media/Movie/欧美电影/马戏之王 (2017)/"
+                                    "马戏之王 (2017) - 1080p.strm"}}
+        self.assertTrue(instance.api_emby_webhook(payload, key="k")["ok"])
+        import time as _t
+        for _ in range(100):
+            if notifies:
+                break
+            _t.sleep(0.05)
+        self.assertEqual(len(notifies), 1)
+        self.assertIn("演练", notifies[0]["title"])
 
 
 if __name__ == "__main__":
