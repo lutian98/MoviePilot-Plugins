@@ -747,5 +747,67 @@ class TestEventTypeSelection(unittest.TestCase):
         self.assertNotIn("ignored", stages, "自定义事件名应当被接受")
 
 
+class TestTaggedSeeds(unittest.TestCase):
+    """标签式辅种（CrossSeed / 青蛙辅种助手）的清理。"""
+
+    class FakeService:
+        def __init__(self, torrents):
+            self._torrents = torrents
+
+        def list_torrents(self):
+            return self._torrents
+
+    class FakeHelper:
+        def __init__(self, services):
+            self._services = services
+
+        def get_services(self):
+            return self._services
+
+    def _instance(self, torrents):
+        rec = FakeRecord(72001, "某片", "/downloads/link/Movie/中国电影/某片 (2016)/某片 (2016) - 1080p.mkv",
+                         "/downloads/PT/保种/某片/某片 (2016) - 1080p.mkv", "aaa111")
+        instance, notifies = build_plugin([rec])
+        instance._del_seed = True
+        instance._seed_tags = "辅种"
+        instance._downloader_helper = self.FakeHelper({"QB": self.FakeService(torrents)})
+        instance.chain = None
+        return instance, rec
+
+    def test_tagged_seed_in_same_dir_is_selected(self):
+        inst, rec = self._instance([
+            {"hash": "seed1", "tags": ["已整理", "辅种"], "save_path": "/downloads/PT/保种/某片"},
+            {"hash": "other", "tags": ["辅种"], "save_path": "/downloads/PT/保种/别的片"},
+            {"hash": "plain", "tags": [], "save_path": "/downloads/PT/保种/某片"},
+        ])
+        self.assertEqual(inst._tagged_seed_hashes(rec), [("QB", "seed1")])
+
+    def test_tag_string_form_is_supported(self):
+        inst, rec = self._instance([
+            {"hash": "seed2", "tags": "辅种,已整理", "save_path": "/downloads/PT/保种/某片/"},
+        ])
+        self.assertEqual(inst._tagged_seed_hashes(rec), [("QB", "seed2")])
+
+    def test_custom_tag_via_config(self):
+        inst, rec = self._instance([
+            {"hash": "seed3", "tags": ["cross-seed"], "save_path": "/downloads/PT/保种/某片"},
+        ])
+        inst._seed_tags = "cross-seed"
+        self.assertEqual(inst._tagged_seed_hashes(rec), [("QB", "seed3")])
+
+    def test_no_helper_is_safe(self):
+        inst, rec = self._instance([])
+        inst._downloader_helper = None
+        self.assertEqual(inst._tagged_seed_hashes(rec), [])
+
+    def test_form_exposes_seed_tags(self):
+        import json
+        instance, _ = build_plugin()
+        form, defaults = instance.get_form()
+        flat = json.dumps(form, ensure_ascii=False)
+        self.assertIn('"model": "seed_tags"', flat)
+        self.assertEqual(defaults.get("seed_tags"), plugin.DEFAULT_SEED_TAGS)
+
+
 if __name__ == "__main__":
     unittest.main()

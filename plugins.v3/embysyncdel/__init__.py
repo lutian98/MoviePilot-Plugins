@@ -76,6 +76,9 @@ ACTION_DELETE = "delete"
 ACTION_STOP = "stop"
 # 辅种递归处理的最大深度，防止环路
 MAX_SEED_DEPTH = 5
+# CrossSeed（青蛙辅种助手）**不落库**，靠给下载器里的种子打标签记录辅种关系；
+# 这些辅种与主体是同一份文件，删主体后它们会变成死种，需要一并清掉。
+DEFAULT_SEED_TAGS = "辅种"
 # 插件自带历史最多保留条数
 MAX_HISTORY = 200
 # 插件历史页展示条数
@@ -306,7 +309,7 @@ class EmbySyncDel(_PluginBase):
     # 插件图标（放在仓库 icons/ 目录，填文件名即可）
     plugin_icon = "embysyncdel.png"
     # 插件版本
-    plugin_version = "1.4.1"
+    plugin_version = "1.4.2"
     # 插件作者
     plugin_author = "lutian98"
     # 作者主页
@@ -353,6 +356,7 @@ class EmbySyncDel(_PluginBase):
         self._source_roots = ""
         self._del_source = True
         self._del_seed = True
+        self._seed_tags = DEFAULT_SEED_TAGS
         self._torrent_action = ACTION_DELETE
         self._title_guard = True
         self._del_history = False
@@ -374,6 +378,7 @@ class EmbySyncDel(_PluginBase):
             self._source_roots = str(config.get("source_roots") or "")
             self._del_source = bool(config.get("del_source", True))
             self._del_seed = bool(config.get("del_seed", True))
+            self._seed_tags = str(config.get("seed_tags") or DEFAULT_SEED_TAGS)
             self._torrent_action = str(config.get("torrent_action") or ACTION_DELETE)
             self._title_guard = bool(config.get("title_guard", True))
             self._del_history = bool(config.get("del_history"))
@@ -397,6 +402,7 @@ class EmbySyncDel(_PluginBase):
                 "exclude_path": self._exclude_path,
                 "del_source": self._del_source,
                 "del_seed": self._del_seed,
+                "seed_tags": self._seed_tags,
                 "torrent_action": self._torrent_action,
                 "title_guard": self._title_guard,
                 "del_history": False,
@@ -698,7 +704,8 @@ class EmbySyncDel(_PluginBase):
                                         "props": {
                                             "model": "del_seed",
                                             "label": "同时处理辅种",
-                                            "hint": "递归清理由转种/辅种插件记录的关联任务。",
+                                            "hint": "递归清理由转种/辅种插件记录的关联任务，并按下面的标签清理"
+                                                    "CrossSeed（青蛙辅种助手）等「标签式」辅种插件建的种子。",
                                             "persistent-hint": True,
                                         },
                                     }
@@ -714,6 +721,23 @@ class EmbySyncDel(_PluginBase):
                                             "model": "title_guard",
                                             "label": "标题防误删校验",
                                             "hint": "要求整理记录标题出现在删除媒体名中，避免误删同名不同片。",
+                                            "persistent-hint": True,
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 3},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "seed_tags",
+                                            "label": "辅种标签",
+                                            "hint": "标签式辅种插件（CrossSeed / 青蛙辅种助手）给辅种种子打的标签，"
+                                                    "默认「辅种」；多个用英文逗号分隔。插件会按"
+                                                    "「标签命中 + 保存目录与该片一致」清理它们。",
                                             "persistent-hint": True,
                                         },
                                     }
@@ -804,6 +828,7 @@ class EmbySyncDel(_PluginBase):
             "exclude_path": "",
             "del_source": True,
             "del_seed": True,
+            "seed_tags": DEFAULT_SEED_TAGS,
             "title_guard": True,
             "torrent_action": ACTION_DELETE,
             "webhook_key": "",
@@ -1345,6 +1370,9 @@ class EmbySyncDel(_PluginBase):
             msg, ok = self._handle_seeds(str(torrent_hash), set())
             lines.extend(msg)
             ok_all = ok_all and ok
+            msg, ok = self._handle_tagged_seeds(record)
+            lines.extend(msg)
+            ok_all = ok_all and ok
         return lines, ok_all
 
     def _downloader_of(self, torrent_hash: str) -> Optional[str]:
@@ -1418,6 +1446,71 @@ class EmbySyncDel(_PluginBase):
         except Exception as err:  # noqa: BLE001
             logger.error(f"联动删除：处理{label} {torrent_hash} 失败：{err}")
             return [f"• 处理{label}失败：{torrent_hash}（{err}）"], False
+
+    def _tagged_seed_hashes(self, record: Any) -> List[Tuple[str, str]]:
+        """按标签找出"标签式辅种"（CrossSeed / 青蛙辅种助手 等）。
+
+        这类插件的辅种关系**不落库**，只体现为下载器里种子的标签（默认「辅种」）。它们与主体是
+        同一份文件，主体被删后必然变成死种，所以要一并清掉。定位判据用**两个条件同时满足**：
+        ① 种子带有配置的辅种标签；② 保存目录与该影片的源文件目录（或库文件目录）一致 ——
+        只靠标签会把别的影片的辅种一起删掉。
+
+        :return: [(下载器名, 种子 hash), ...]
+        """
+        tags = [item.strip() for item in str(getattr(self, "_seed_tags", "") or "").split(",")
+                if item.strip()]
+        helper = getattr(self, "_downloader_helper", None)
+        if not tags or not helper:
+            return []
+        target_dirs = set()
+        for candidate in (getattr(record, "src", None), getattr(record, "dest", None)):
+            if candidate:
+                target_dirs.add(os.path.dirname(str(candidate).replace("\\", "/")))
+        if not target_dirs:
+            return []
+        try:
+            services = helper.get_services() or {}
+        except Exception as err:  # noqa: BLE001
+            logger.warning(f"联动删除：读取下载器服务失败，跳过标签式辅种清理：{err}")
+            return []
+        found: List[Tuple[str, str]] = []
+        for name, service in services.items():
+            lister = getattr(service, "list_torrents", None)
+            if not callable(lister):
+                continue
+            try:
+                torrents = lister()
+            except Exception as err:  # noqa: BLE001
+                logger.warning(f"联动删除：列举 {name} 的种子失败：{err}")
+                continue
+            for item in torrents or []:
+                if not isinstance(item, dict):
+                    continue
+                item_tags = item.get("tags") or []
+                if isinstance(item_tags, str):
+                    item_tags = [x.strip() for x in item_tags.split(",")]
+                if not any(tag in item_tags for tag in tags):
+                    continue
+                save = str(item.get("save_path") or item.get("content_path") or "").replace("\\", "/")
+                if not save:
+                    continue
+                if not any(save == d or save.startswith(d.rstrip("/") + "/") for d in target_dirs):
+                    continue
+                item_hash = str(item.get("hash") or "")
+                if item_hash and (str(name), item_hash) not in found:
+                    found.append((str(name), item_hash))
+        return found
+
+    def _handle_tagged_seeds(self, record: Any) -> Tuple[List[str], bool]:
+        """清理标签式辅种（CrossSeed 等），返回 (结果行, 是否成功)。"""
+        lines: List[str] = []
+        ok_all = True
+        for downloader, seed_hash in self._tagged_seed_hashes(record):
+            msg, ok = self._act_torrent(seed_hash, downloader, self._torrent_action,
+                                        f"标签式辅种[{downloader}]")
+            lines.extend(msg)
+            ok_all = ok_all and ok
+        return lines, ok_all
 
     def _handle_seeds(self, torrent_hash: str, visited: set, depth: int = 0) -> Tuple[List[str], bool]:
         """递归处理辅种记录（读取辅种插件保存的关联任务）。返回 (结果行, 是否成功)。"""
