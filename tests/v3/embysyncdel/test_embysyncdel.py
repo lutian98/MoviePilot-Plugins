@@ -68,6 +68,9 @@ def build_plugin(records=None, dry_run=True, library_path="/mnt/user/Media/Strm/
     instance._downloader_helper = None
     instance._default_downloader = None
     instance._notify_result = lambda **kwargs: notifies.append(kwargs)
+    # 幂等缓存 / 源文件根目录：每个用例都从干净状态开始（同实例复用会互相干扰）
+    instance._recent_events = {}
+    instance._source_roots = ""
     return instance, notifies
 
 
@@ -179,7 +182,8 @@ class TestSameMedia(unittest.TestCase):
         """同目录多版本（1080p / 2160p）全部命中。"""
         record = "/downloads/link/Movie/中国电影/某片 (2016)/某片 (2016) - 2160p.mp4"
         event = "/downloads/link/Movie/中国电影/某片 (2016)/某片 (2016) - 1080p.strm"
-        self.assertTrue(plugin.same_media(record, event, is_tv=False))
+        self.assertTrue(plugin.same_media(record, event, is_tv=False,
+                                          record_title="某片", media_name="某片"))
 
     def test_directory_path_event_does_not_match(self):
         """事件路径是「目录」时**不得**命中该目录下的记录。
@@ -329,7 +333,8 @@ class TestDeleteFlow(unittest.TestCase):
                             "/downloads/link/Movie/中国电影/微微一笑很倾城 (2016)/某片 - 1080p.mkv")
         instance, notifies = build_plugin([record], dry_run=False)
         instance.sync_del_by_webhook(app_stub.Event(event_data=make_event()))
-        self.assertEqual(instance._transferhis.deleted, [20597])
+        # 新语义：文件在 MP 内不可见（挂载缺失/路径配错）→ 判失败 → 保留整理记录待重试
+        self.assertEqual(instance._transferhis.deleted, [])
         self.assertEqual(len(notifies), 1)
         self.assertIn("联动删除完成", notifies[0]["title"])
 
@@ -569,6 +574,117 @@ class TestContainerEventGuard(unittest.TestCase):
             _t.sleep(0.05)
         self.assertEqual(len(notifies), 1)
         self.assertIn("演练", notifies[0]["title"])
+
+
+class TestNewGuards(unittest.TestCase):
+    """2026-10-11 七把刀审查后新增的护栏用例。"""
+
+    def test_same_dir_but_different_film_is_not_matched(self):
+        """同目录里放着另一部片时不得连带命中（原实现只比父目录，会一起删）。"""
+        record = "/downloads/link/Movie/中国电影/某片 (2016)/某片 (2016) - 1080p.mkv"
+        event = "/downloads/link/Movie/中国电影/另一部 (2016)/另一部 (2016) - 1080p.strm"
+        self.assertFalse(plugin.same_media(record, event, is_tv=False,
+                                           record_title="某片", media_name="某片"))
+        # 同一目录、事件讲的是另一部片 → 必须拒绝（原实现只比父目录会命中）
+        same_dir_event = "/downloads/link/Movie/中国电影/某片 (2016)/另一部 (2016) - 1080p.strm"
+        self.assertFalse(plugin.same_media(record, same_dir_event, is_tv=False,
+                                           record_title="某片", media_name="另一部"))
+
+    def test_title_subtitle_prefix_is_not_the_same_film(self):
+        """「X」与「X：副标题」是两部片：子串包含式护栏会放行，精确归一化必须拦住。"""
+        record = "/downloads/link/Movie/欧美电影/博物馆奇妙夜3 (2014)/博物馆奇妙夜3 (2014) - 1080p.mkv"
+        event = ("/downloads/link/Movie/欧美电影/博物馆奇妙夜3：墓葬秘密 (2014)/"
+                 "博物馆奇妙夜3：墓葬秘密 (2014) - 1080p.strm")
+        self.assertFalse(plugin.same_media(record, event, is_tv=False,
+                                           record_title="博物馆奇妙夜3",
+                                           media_name="博物馆奇妙夜3：墓葬秘密"))
+
+    def test_title_normalisation_accepts_common_variants(self):
+        """归一化要能吸收年份/分辨率/来源后缀/全角括号的写法差异。"""
+        self.assertTrue(plugin.title_matches("微微一笑很倾城", "微微一笑很倾城 (2016) - 1080p.strm"))
+        self.assertTrue(plugin.title_matches("微微一笑很倾城", "微微一笑很倾城(2016).BluRay.1080p.x265.mkv"))
+        self.assertTrue(plugin.title_matches("Frozen", "frozen 2013 1080p"))
+        self.assertFalse(plugin.title_matches("", "微微一笑很倾城"))
+        self.assertFalse(plugin.title_matches("微微一笑很倾城", ""))
+
+    def test_unknown_media_type_is_treated_as_non_movie(self):
+        """类型缺失/未知时按严格口径匹配：剧集单集事件不得命中整季记录。"""
+        rec_e05 = FakeRecord(70005, "某剧",
+                            "/downloads/link/TV/某剧 (2019)/Season 1/某剧 - S01E05 - 1080p.mkv")
+        instance, notifies = build_plugin([rec_e05])
+        instance._webhook_key = "k"
+        payload = {"Event": "library.deleted",
+                   "Item": {"Type": "", "Name": "某剧", "Path": "/mnt/user/Media/Strm/Media/TV/某剧 (2019)/"
+                                                              "Season 1/某剧 - S01E01 - 1080p.strm"}}
+        instance.api_emby_webhook(payload, key="k")
+        import time as _t
+        _t.sleep(0.6)
+        self.assertEqual(instance._transferhis.deleted, [], "类型缺失时不得把剧集当电影匹配")
+
+    def test_placeholder_skipped_when_no_path_mapping(self):
+        """未配置路径映射时占位文件必须拒删（fail-closed），不能无条件删任意 .strm。"""
+        instance, _ = build_plugin(library_path="")
+        lines, ok = instance._remove_placeholder(
+            "/mnt/user/Media/Strm/Media/Movie/X/某片 (2016) - 1080p.strm")
+        self.assertTrue(any("跳过占位文件" in line for line in lines))
+        self.assertTrue(ok, "跳过占位不算失败（媒体服务器挂载在 MP 内不可见属环境事实）")
+
+    def test_unlink_failure_keeps_record(self):
+        """删除抛异常时必须判失败、保留整理记录（原实现吞掉异常仍删记录）。"""
+        rec = FakeRecord(70100, "某片", "/downloads/link/Movie/中国电影/某片 (2016)/某片 (2016) - 1080p.mkv")
+        instance, _ = build_plugin([rec])
+        import unittest.mock as mock
+        with mock.patch.object(plugin.Path, "exists", return_value=True), \
+             mock.patch.object(plugin.Path, "is_dir", return_value=False), \
+             mock.patch.object(plugin.Path, "unlink", side_effect=OSError("device busy")):
+            lines, ok = instance._delete_record(rec)
+        self.assertFalse(ok)
+        self.assertIn("保留整理记录", " ".join(lines))
+        self.assertEqual(instance._transferhis.deleted, [])
+
+    def test_duplicate_event_ignored(self):
+        """同一事件短时间内重复到达只处理一次（幂等）。"""
+        rec = FakeRecord(70200, "某片", "/downloads/link/Movie/中国电影/某片 (2016)/某片 (2016) - 1080p.mkv")
+        instance, notifies = build_plugin([rec])
+        instance._webhook_key = "k"
+        payload = {"Event": "library.deleted",
+                   "Item": {"Type": "Movie", "Name": "某片", "ProductionYear": 2016,
+                            "Path": "/mnt/user/Media/Strm/Media/Movie/中国电影/某片 (2016)/"
+                                    "某片 (2016) - 1080p.strm"}}
+        first = instance.api_emby_webhook(payload, key="k")
+        import time as _t
+        _t.sleep(0.4)
+        second = instance.api_emby_webhook(payload, key="k")
+        self.assertEqual(first.get("msg"), "accepted")
+        self.assertEqual(second.get("msg"), "accepted")   # 入口一律接受
+        _t.sleep(0.5)
+        stages = [x.get("stage") for x in (instance.get_data("history") or [])]
+        self.assertIn("duplicate_ignored", stages)        # 但第二次不再处理（幂等）
+
+    def test_dry_run_list_matches_real_run_decisions(self):
+        """演练清单必须与实跑同口径：被 title_guard 拦下的记录，演练时也不能列出。"""
+        rec = FakeRecord(70300, "完全不同的片名",
+                         "/downloads/link/Movie/中国电影/某片 (2016)/某片 (2016) - 1080p.mkv")
+        instance, notifies = build_plugin([rec], dry_run=True)
+        instance._enabled = True
+        instance._handle_event_data(_event_for("某片"))
+        import time as _t
+        _t.sleep(0.5)
+        self.assertTrue(notifies, "被全部拦下时也应有一条告警通知")
+        self.assertIn("防误删", notifies[0]["title"])
+        self.assertNotIn("将删除", notifies[0].get("text") or "")
+
+
+def _event_for(media_name):
+    return plugin.SimpleNamespace(
+        event="library.deleted",
+        item_name=media_name,
+        item_path=f"/mnt/user/Media/Strm/Media/Movie/中国电影/{media_name} (2016)/{media_name} (2016) - 1080p.strm",
+        media_type="Movie",
+        media_source=None,
+        media_id=None,
+        json_object={},
+    )
 
 
 if __name__ == "__main__":

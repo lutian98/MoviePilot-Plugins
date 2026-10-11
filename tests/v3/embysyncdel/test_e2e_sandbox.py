@@ -121,6 +121,9 @@ class Sandbox:
         self.instance._dry_run = dry_run
         self.instance._event_types = plugin.DEFAULT_EVENT_TYPES
         self.instance._library_path = f"{self.emby}#{self.library}"
+        # 幂等缓存按实例存在：同一沙箱里多次 fire() 同一报文时必须清空，否则第二次会被正确去重
+        self.instance._recent_events = {}
+        self.instance._source_roots = ""
         self.instance._exclude_path = ""
         self.instance._del_source = True
         self.instance._del_seed = True
@@ -229,7 +232,7 @@ class TestSandboxRealDelete(unittest.TestCase):
         self.sbx.fire()
         self.assertEqual(len(self.sbx.notifies), 1)
         self.assertIn("联动删除完成", self.sbx.notifies[0]["title"])
-        self.assertIn("成功处理 1 条，失败 0 条", self.sbx.notifies[0]["text"])
+        self.assertIn("成功 1 条，失败 0 条", self.sbx.notifies[0]["text"])
 
 
 class TestSandboxStopAction(unittest.TestCase):

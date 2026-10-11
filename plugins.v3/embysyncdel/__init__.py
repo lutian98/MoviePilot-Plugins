@@ -13,14 +13,20 @@ Emby 删除影片 / 剧集后，同步清理 MoviePilot 侧的整理记录、源
    ``…/影片 - 1080p.strm``，而 MoviePilot 记录里是 ``…/影片 - 1080p.mkv``，
    后缀不同 → 永远查不到整理记录 → 静默放弃。本插件按 **媒体身份 + 目录 / 文件名主干**
    匹配，与后缀无关。
-3. **媒体身份三级兜底** —— 插件事件 → 提供方 ID（ProviderIds）→ 手动指定，
-   任一层拿到来源与原生 ID 即可继续，避免"身份缺失即整体失效"。
+3. **媒体身份三级兜底** —— 插件事件 → 提供方 ID（ProviderIds）→ **媒体路径匹配**
+   （要求路径对应、命中记录唯一，并叠加标题防误删校验），任一层拿到身份即可继续，
+   避免"身份缺失即整体失效"。
 4. **默认只出清单** —— ``dry_run`` 默认开启：只发通知列出将要删除的内容，不动任何数据。
 
 License: GPL-3.0
 """
 
+import hmac
 import os
+import re
+import shutil
+import time
+import unicodedata
 import threading
 import uuid
 from datetime import datetime
@@ -46,6 +52,10 @@ DEFAULT_EVENT_TYPES = "library.deleted,ItemDeleted,item.deleted"
 
 # 容器级条目类型：这些事件指的是「文件夹 / 剧集容器」，不是具体影片文件。
 # 实测这类事件大量来自整理换版重建与其它媒体库的清理动作，按目录名匹配极易误删仍在库里的影片。
+# 电影类媒体类型（与 CONTAINER_ITEM_TYPES 并列的单一事实源）。
+# 注意：**空字符串不在此列** —— 类型缺失时按剧集口径做严格匹配，避免把未知类型当电影走"父目录即命中"。
+MOVIE_ITEM_TYPES = ("Movie", "MOV", "Video")
+
 CONTAINER_ITEM_TYPES = {
     "folder", "series", "season", "collectionfolder", "boxset", "collection",
 }
@@ -56,6 +66,14 @@ ACTION_STOP = "stop"
 MAX_SEED_DEPTH = 5
 # 插件自带历史最多保留条数
 MAX_HISTORY = 200
+# 插件历史页展示条数
+HISTORY_PAGE_SIZE = 20
+# 直投 webhook 自动生成的密钥长度
+WEBHOOK_KEY_LEN = 24
+# 删除空目录时最多向上回退的层数（防止沿父目录一路删到媒体库之外）
+MAX_PRUNE_DEPTH = 8
+# 同一删除事件在这么长时间内只处理一次（Emby 重投 / 代理重放 / 双入口同时到达）
+EVENT_DEDUP_WINDOW = 60
 # 整理记录的查询上限（同一部片的多版本记录通常只有几条）
 RECORD_QUERY_PAGE_SIZE = 200
 
@@ -96,13 +114,29 @@ def parse_mappings(raw: Optional[str]) -> List[Tuple[str, str]]:
             left, right = line.split(":", 1)
         else:
             continue
-        left = left.strip().rstrip("/").rstrip("\\")
-        right = right.strip().rstrip("/").rstrip("\\")
+        # 统一反斜杠：map_path 与 is_within 对同一份映射必须用同一套路径口径
+        left = left.strip().replace("\\", "/").rstrip("/")
+        right = right.strip().replace("\\", "/").rstrip("/")
         if left and right:
             mappings.append((left, right))
     # 长前缀优先，避免 /a 抢在 /a/b 前面造成误替换
     mappings.sort(key=lambda item: len(item[0]), reverse=True)
     return mappings
+
+
+_MAPPINGS_CACHE: Dict[str, List[Tuple[str, str]]] = {}
+
+
+def cached_mappings(raw: Optional[str]) -> List[Tuple[str, str]]:
+    """带缓存的 parse_mappings：同一个配置串在一次删除流程里会被解析十几次，结果必然相同。"""
+    key = str(raw or "")
+    cached = _MAPPINGS_CACHE.get(key)
+    if cached is None:
+        cached = parse_mappings(raw)
+        if len(_MAPPINGS_CACHE) > 32:      # 配置只会有寥寥几份，防止有人疯狂改配置把内存撑大
+            _MAPPINGS_CACHE.clear()
+        _MAPPINGS_CACHE[key] = cached
+    return cached
 
 
 def map_path(path: Optional[str], mappings: List[Tuple[str, str]]) -> str:
@@ -124,19 +158,63 @@ def map_path(path: Optional[str], mappings: List[Tuple[str, str]]) -> str:
     return normalized
 
 
-def same_media(record_dest: Optional[str], event_path: Optional[str], is_tv: bool) -> bool:
+def normalize_title(text: Optional[str]) -> str:
+    """
+    标题归一化：用于「整理记录标题 vs 媒体名」的防误删比较。
+
+    只做与"同一部片的不同写法"有关的归一（全角半角、大小写、年份、分辨率与来源后缀、空白与常见标点），
+    **保留冒号** —— 冒号是副标题分隔符，「X」与「X：副标题」是两部不同的片，归一后必须仍然不等。
+    """
+    if not text:
+        return ""
+    value = unicodedata.normalize("NFKC", str(text)).lower()
+    value = re.sub(r"\.(mkv|mp4|avi|ts|strm|iso|m2ts|rmvb|mov|wmv|flv|ass|srt)$", "", value)
+    value = re.sub(r"\b(19|20)\d{2}\b", " ", value)
+    value = re.sub(r"\b(1080|720|2160|480|576)[pi]\b", " ", value)
+    value = re.sub(
+        r"\b(bluray|blu-ray|web-?dl|webrip|hdrip|dvdrip|hdtv|remux|uhd|x26[45]|h26[45]|hevc|avc|aac|ac3|eac3|dts|"
+        r"truehd|atmos|10bit|8bit|hdr|sdr|default|chi|zh-cn|gb|big5)\b", " ", value)
+    value = re.sub(r"[^0-9a-z\u4e00-\u9fff:]+", "", value)
+    return value
+
+
+def title_matches(record_title: Optional[str], media_name: Optional[str]) -> bool:
+    """
+    防误删判据：整理记录标题必须与媒体名**归一化后完全相等**。
+
+    为什么不用子串包含（原实现 ``record.title in media_name``）：
+    整理记录标题经常是媒体名的真前缀（「X」与「X：副标题」「X2」是不同影片），用 ``in`` 会把
+    续集/副标题片误判为同一部；而且记录标题为空（未刮削）时 ``in`` 判断整条失效，护栏形同不存在。
+    """
+    left = normalize_title(record_title)
+    right = normalize_title(media_name)
+    if not left or not right:
+        return False
+    return left == right
+
+
+def same_media(
+        record_dest: Optional[str],
+        event_path: Optional[str],
+        is_tv: bool,
+        record_title: Optional[str] = None,
+        media_name: Optional[str] = None,
+) -> bool:
     """
     判断整理记录与删除事件指向的是不是同一份媒体（**与文件后缀无关**）。
 
-    规则：
+    规则（宁可漏清、不可误删）：
 
-    - 电影：父目录相同即认为是同一部（同一部片的多个版本 / 多分辨率都命中）；
-      文件名主干相同也命中（跨目录整理的情况）。
-    - 剧集：父目录是季目录，必须文件名主干相同，避免整季误删。
+    - 非电影（含未知/空类型）：**必须文件名主干完全相同**（剧集季目录下用于避免整季误删）。
+    - 电影：文件名主干相同即命中（跨目录整理、strm 与真实文件同名主干都覆盖）；
+      仅"父目录相同"还不够，必须**再叠加标题一致**（record_title 与 media_name 归一化后相等），
+      否则同一目录下放着的另一部片（合集/扁平媒体库）会被连带删除。
 
     :param record_dest: 整理记录的 dest
     :param event_path: 映射后的删除事件路径
-    :param is_tv: 是否剧集
+    :param is_tv: 是否剧集/未知类型
+    :param record_title: 整理记录的标题（同目录匹配时的二次确认）
+    :param media_name: 事件上报的媒体名
     :return: 是否同一份媒体
     """
     if not record_dest or not event_path:
@@ -153,7 +231,12 @@ def same_media(record_dest: Optional[str], event_path: Optional[str], is_tv: boo
     # 实测生产日志 633 条 Movie 型删除事件全部是文件路径（0 条目录路径），
     # 而目录型路径恰恰来自整理换版重建（Emby 先报"文件夹被删"、随后影片又被加回来），
     # 一旦按目录命中就会把仍在库里的影片连源文件一起删掉，且不可逆。宁可漏清、不可误删。
-    return dest.parent == target.parent
+    #
+    # 同目录命中还必须叠加"标题一致"这道二次确认：同一目录下可能放着不同的影片
+    #（合集打包、扁平媒体库、正片与特典混放），只按父目录相等会把它们一起删掉。
+    if dest.parent == target.parent and title_matches(record_title, media_name):
+        return True
+    return False
 
 
 def is_within(path: Optional[str], roots: List[str]) -> bool:
@@ -171,6 +254,9 @@ def is_within(path: Optional[str], roots: List[str]) -> bool:
         if not root:
             continue
         root_abs = os.path.abspath(str(root).replace("\\", "/"))
+        if root_abs in ("/", ""):
+            # 根写成 "/" 时前缀比较会退化成"全盘放行"，直接忽略这条无效根
+            continue
         if target == root_abs or target.startswith(root_abs.rstrip("/") + "/"):
             return True
     return False
@@ -200,7 +286,7 @@ class EmbySyncDel(_PluginBase):
     # 插件图标（放在仓库 icons/ 目录，填文件名即可）
     plugin_icon = "embysyncdel.png"
     # 插件版本
-    plugin_version = "1.3.0"
+    plugin_version = "1.4.0"
     # 插件作者
     plugin_author = "lutian98"
     # 作者主页
@@ -243,6 +329,7 @@ class EmbySyncDel(_PluginBase):
         self._event_types = DEFAULT_EVENT_TYPES
         self._library_path = ""
         self._exclude_path = ""
+        self._source_roots = ""
         self._del_source = True
         self._del_seed = True
         self._torrent_action = ACTION_DELETE
@@ -256,6 +343,7 @@ class EmbySyncDel(_PluginBase):
             self._event_types = str(config.get("event_types") or DEFAULT_EVENT_TYPES)
             self._library_path = str(config.get("library_path") or "")
             self._exclude_path = str(config.get("exclude_path") or "")
+            self._source_roots = str(config.get("source_roots") or "")
             self._del_source = bool(config.get("del_source", True))
             self._del_seed = bool(config.get("del_seed", True))
             self._torrent_action = str(config.get("torrent_action") or ACTION_DELETE)
@@ -264,7 +352,7 @@ class EmbySyncDel(_PluginBase):
             # 直投 webhook 的密钥（Emby Webhooks 插件无法发送 MP 的 API Key，改用 URL 密钥自校验）
             self._webhook_key = str(config.get("webhook_key") or "").strip()
             if not self._webhook_key:
-                self._webhook_key = uuid.uuid4().hex[:24]
+                self._webhook_key = uuid.uuid4().hex[:WEBHOOK_KEY_LEN]
 
             # 清理插件历史（一次性开关）
             if self._del_history:
@@ -363,7 +451,8 @@ class EmbySyncDel(_PluginBase):
         处理放后台线程执行并立即返回，避免拖住 Emby 的 webhook 请求。
         """
         expected_key = str(getattr(self, "_webhook_key", "") or "")
-        if not expected_key or str(key or "") != expected_key:
+        # 恒定时间比较：避免通过响应时间逐字节猜出密钥
+        if not expected_key or not hmac.compare_digest(str(key or ""), expected_key):
             self._record_event("api_rejected", "直投 webhook 密钥校验失败", "")
             return {"ok": False, "msg": "bad key"}
         if not isinstance(payload, dict) or not payload:
@@ -413,7 +502,6 @@ class EmbySyncDel(_PluginBase):
         item_type = str(item.get("Type") or item.get("type") or "")
         return SimpleNamespace(
             event=str(payload.get("Event") or payload.get("event") or ""),
-            channel=str(payload.get("channel") or payload.get("Channel") or "emby"),
             item_type=item_type,
             media_type=item_type,
             item_name=name,
@@ -532,7 +620,7 @@ class EmbySyncDel(_PluginBase):
                                             "model": "exclude_path",
                                             "rows": 2,
                                             "label": "排除路径（不处理）",
-                                            "placeholder": "一行一个；命中前缀的媒体路径直接跳过",
+                                            "placeholder": "一行一个；媒体服务器路径包含该字符串即跳过（子串匹配，不是前缀）",
                                         },
                                     }
                                 ],
@@ -688,13 +776,21 @@ class EmbySyncDel(_PluginBase):
 
     def _handle_webhook_event(self, event: Event) -> None:
         """媒体服务器删除事件 → 同步清理。"""
-        if not self._enabled or not event:
+        if not event:      # 启用开关、事件名与幂等判定统一在 _handle_event_data 内做，避免两处口径不一致
             return
         self._handle_event_data(event.event_data)
 
     def _handle_event_data(self, event_data: Any) -> None:
         """事件体处理链：宿主 webhook 事件与「媒体服务器直投 JSON」共用同一条逻辑。"""
         if not self._enabled or not event_data:
+            return
+        # 幂等：Emby 重投 / 代理重放 / 双入口同时到达时，同一事件只处理一次
+        if self._event_seen_recently(event_data):
+            self._record_event(
+                "duplicate_ignored",
+                f"重复事件已在 {EVENT_DEDUP_WINDOW} 秒内处理过，跳过：{getattr(event_data, 'event', '')}",
+                str(getattr(event_data, "item_name", "") or ""),
+            )
             return
 
         event_type = str(event_data.event or "")
@@ -787,8 +883,10 @@ class EmbySyncDel(_PluginBase):
             media_id: str,
     ) -> None:
         """查找整理记录并执行清理。"""
-        is_tv = media_type not in ("Movie", "MOV", "Video", "")
-        target_path = map_path(media_path, parse_mappings(self._library_path))
+        # 未知/空类型一律按"非电影"的严格口径匹配：类型缺失时若按电影走"父目录即命中"，
+        # 剧集单集事件会命中整季记录（实测 S01E01 的事件能匹配到整季 3 条记录）。
+        is_tv = media_type.strip() not in MOVIE_ITEM_TYPES
+        target_path = map_path(media_path, cached_mappings(self._library_path))
         if not self._library_path:
             logger.warning("联动删除：未配置媒体库路径映射，将直接使用媒体服务器路径匹配")
 
@@ -797,7 +895,7 @@ class EmbySyncDel(_PluginBase):
             target_path=target_path,
             media_source=media_source,
             media_id=media_id,
-            media_type=media_type,
+            is_tv=is_tv,
         )
         if not records:
             message = (
@@ -812,9 +910,42 @@ class EmbySyncDel(_PluginBase):
                                 image=self._fallback_image())
             return
 
+        # 演练与实跑必须用**同一份**待处理清单：护栏（防误删校验）在分支之前统一应用，
+        # 否则演练列出的内容与关掉演练后实际会删的内容不一致，"先出清单再确认"的流程就失效了。
+        kept, guarded = [], []
+        for record in records:
+            if self._title_guard and not title_matches(getattr(record, "title", None), media_name):
+                guarded.append(record)
+                logger.warning(
+                    f"联动删除：整理记录 {getattr(record, 'id', '?')}（{getattr(record, 'title', '')}）"
+                    f"与删除媒体 {media_name} 不符，防误删已跳过"
+                )
+                continue
+            kept.append(record)
+        records = kept
+
         plan: List[Dict[str, Any]] = []
         results: List[str] = []
         error_cnt = 0
+
+        guard_note = ""
+        if guarded:
+            guard_note = "\n".join(
+                f"• 防误删跳过（标题与媒体名不一致）：记录 {getattr(r, 'id', '?')}（{getattr(r, 'title', '')}）"
+                for r in guarded
+            )
+            results.append(guard_note)
+
+        if not records:
+            message = (
+                f"联动删除：命中 {len(records) + len(guarded)} 条整理记录，但全部被「标题防误删校验」拦下"
+                f"（媒体名：{media_name}），未执行任何删除。若确认无误请检查整理记录标题。"
+            )
+            logger.warning(message)
+            self._record_event("guarded", message, media_name, media_id)
+            self._notify_result(title="⚠️ 联动删除被防误删校验拦下", text=message,
+                                image=self._fallback_image())
+            return
 
         if self._dry_run:
             for record in records:
@@ -835,7 +966,6 @@ class EmbySyncDel(_PluginBase):
                 title=f"🧪 演练：{media_name} 将删除 {len(plan)} 项",
                 text=f"{text}\n\n当前为演练模式，未执行任何删除。核对无误后请在插件配置中关闭「演练模式」。",
                 image=self._poster_image(records),
-                mtype=MessageType.Plugin,
             )
             logger.info(f"联动删除（演练）：{media_name} 命中 {len(plan)} 条整理记录")
             self._append_history(
@@ -851,14 +981,11 @@ class EmbySyncDel(_PluginBase):
             return
 
         for record in records:
-            if self._title_guard and record.title and record.title not in media_name:
-                logger.warning(
-                    f"联动删除：整理记录 {record.id}（{record.title}）与删除媒体 {media_name} 不符，"
-                    f"防误删已跳过"
-                )
-                continue
             try:
-                results.extend(self._delete_record(record))
+                lines, ok = self._delete_record(record)
+                results.extend(lines)
+                if not ok:
+                    error_cnt += 1
             except Exception as err:  # noqa: BLE001 - 单条失败不影响其余记录
                 error_cnt += 1
                 results.append(f"• 记录 {record.id} 处理失败：{err}")
@@ -866,31 +993,42 @@ class EmbySyncDel(_PluginBase):
 
         # 占位文件（strm）一并清理：只删占位、不碰真实媒体文件，避免媒体服务器下次扫描又把条目加回来
         if self._del_source:
-            results.extend(self._remove_placeholder(media_path))
+            msg, ok = self._remove_placeholder(media_path)
+            results.extend(msg)
+            if not ok:
+                error_cnt += 1
 
         self._append_history(media_name, media_id, results, error_cnt)
         if self._notify:
             head = "✅" if not error_cnt else "⚠️"
             body = "\n".join(results) if results else "无可删除内容"
+            summary = f"成功 {len(records) - error_cnt} 条，失败 {error_cnt} 条"
+            if guarded:
+                summary += f"，防误删跳过 {len(guarded)} 条"
             self._notify_result(
                 title=f"{head} 联动删除完成：{media_name}",
-                text=f"{body}\n\n成功处理 {len(records) - error_cnt} 条，失败 {error_cnt} 条。",
+                text=f"{body}\n\n{summary}。",
                 image=self._poster_image(records),
-                mtype=MessageType.Plugin,
             )
 
-    def _delete_record(self, record: Any) -> List[str]:
-        """删除单条整理记录对应的文件与下载任务，最后删除记录本身。"""
+    def _delete_record(self, record: Any) -> Tuple[List[str], bool]:
+        """
+        删除单条整理记录对应的文件与下载任务，最后删除记录本身。
+
+        :return: (结果描述行, 整理记录是否已删除)。**任何一步没做干净都返回 False 并保留整理记录** ——
+                 整理记录是清理失败后唯一的重试依据，删掉它就永久失去补删能力（用户还以为已经删完了）。
+        """
         lines: List[str] = []
         allowed_roots = self._allowed_roots()
-        # 整理记录是清理失败后的重试依据：外部清理没做干净就保留记录，下次还能补删
         cleanup_ok = True
 
         # 1、媒体库文件与源文件
         if self._del_source:
             if record.dest:
                 if is_within(record.dest, allowed_roots):
-                    lines.extend(self._remove_file(record.dest, "媒体库文件"))
+                    msg, ok = self._remove_file(record.dest, "媒体库文件")
+                    lines.extend(msg)
+                    cleanup_ok = cleanup_ok and ok
                 else:
                     cleanup_ok = False
                     lines.append(f"• 跳过媒体库文件（不在映射范围内，请检查路径映射）：{record.dest}")
@@ -899,38 +1037,103 @@ class EmbySyncDel(_PluginBase):
                         f"请检查「媒体库路径映射」配置"
                     )
             if record.src:
-                if is_media_file(record.src):
-                    lines.extend(self._remove_file(record.src, "源文件"))
+                if not is_media_file(record.src) and not os.path.isdir(str(record.src)):
+                    cleanup_ok = False
+                    lines.append(f"• 跳过源文件（既不是媒体文件也不是目录）：{record.src}")
+                elif not self._source_allowed(record.src):
+                    cleanup_ok = False
+                    lines.append(f"• 跳过源文件（不在允许的源文件根目录内）：{record.src}")
+                    logger.warning(
+                        f"联动删除：源文件 {record.src} 不在「源文件根目录」配置内，已跳过"
+                    )
                 else:
-                    lines.append(f"• 跳过源文件（非媒体文件）：{record.src}")
+                    # 剪枝根 = 源文件所在目录的**上一级**：片子自己的源目录可以被清掉，
+                    # 但绝不越过它继续往上删（保种根下还有别的片子）。
+                    _src_dir = os.path.dirname(str(record.src))
+                    msg, ok = self._remove_file(record.src, "源文件",
+                                                [os.path.dirname(_src_dir) or _src_dir])
+                    lines.extend(msg)
+                    cleanup_ok = cleanup_ok and ok
         # 2、下载任务（含转种与辅种）
-        lines.extend(self._handle_torrents(record))
+        try:
+            msg, ok = self._handle_torrents(record)
+            lines.extend(msg)
+            cleanup_ok = cleanup_ok and ok
+        except Exception as err:  # noqa: BLE001
+            cleanup_ok = False
+            lines.append(f"• 处理下载任务异常：{err}")
+            logger.error(f"联动删除：处理下载任务异常：{err}")
 
         # 3、整理记录最后删除：它是跨文件系统 / 下载器清理失败后的重试依据
         if cleanup_ok and self._transferhis:
-            self._transferhis.delete(record.id)
+            try:
+                self._transferhis.delete(record.id)
+            except Exception as err:  # noqa: BLE001
+                lines.append(f"• 删除整理记录失败：{record.id}（{err}）")
+                logger.error(f"联动删除：删除整理记录 {record.id} 失败：{err}")
+                return lines, False
             lines.append(f"• 已删除整理记录：{record.id}（{record.title}）")
         else:
-            lines.append(f"• 外部清理未完成，保留整理记录以便重试：{record.id}")
-        return lines
+            lines.append(f"• 外部清理未完成（失败或跳过），保留整理记录以便重试：{record.id}")
+        return lines, cleanup_ok
 
-    def _remove_file(self, path: str, label: str) -> List[str]:
-        """删除文件并清理空的父目录。"""
+    @staticmethod
+    def _root_reachable(target: Path, depth: int = 5) -> bool:
+        """
+        目标文件不存在时，判断它"本该在的目录"是否可达。
+
+        用于区分两种情况（不区分会把"挂载缺失"当成"已经删过了"）：
+        - 目录可达 → 幂等重放（之前删过了），可以判定清理已完成；
+        - 目录不可达 → 挂载缺失/路径映射配错，文件根本没被删，必须判失败并保留整理记录。
+        """
+        current = target.parent
+        for _ in range(depth):
+            try:
+                if current.is_dir():
+                    return True
+            except Exception:  # noqa: BLE001
+                return False
+            if current.parent == current:
+                return False
+            current = current.parent
+        return False
+
+    def _remove_file(
+            self, path: str, label: str, prune_roots: Optional[List[str]] = None
+    ) -> Tuple[List[str], bool]:
+        """
+        删除文件（或目录）并清理空的父目录。
+
+        :return: (结果描述行, 是否确认清理完成)
+        """
         lines: List[str] = []
         target = Path(str(path).replace("\\", "/"))
         try:
+            if target.is_dir():
+                shutil.rmtree(target)
+                lines.append(f"• 已删除{label}（目录）：{path}")
+                self._prune_empty_dirs(target.parent, prune_roots)
+                return lines, True
             if target.exists():
-                target.unlink(missing_ok=True)
+                target.unlink()
                 lines.append(f"• 已删除{label}：{path}")
-                self._prune_empty_dirs(target.parent)
-            else:
-                lines.append(f"• {label}不存在，已跳过：{path}")
+                self._prune_empty_dirs(target.parent, prune_roots)
+                return lines, True
+            # 不存在：区分"已经被删过（幂等）"与"根本看不见（挂载缺失/映射配错）"
+            if self._root_reachable(target):
+                lines.append(f"• {label}不存在（可能已删除过），已跳过：{path}")
+                return lines, True
+            lines.append(
+                f"• 删除{label}失败：{path}（所在目录在 MoviePilot 内不可见，请检查挂载与路径映射）"
+            )
+            logger.error(f"联动删除：{label} {path} 所在目录不可见，判定为未清理")
+            return lines, False
         except Exception as err:  # noqa: BLE001
             lines.append(f"• 删除{label}失败：{path}（{err}）")
             logger.error(f"联动删除：删除{label} {path} 失败：{err}")
-        return lines
+            return lines, False
 
-    def _remove_placeholder(self, media_path: str) -> List[str]:
+    def _remove_placeholder(self, media_path: str) -> Tuple[List[str], bool]:
         """
         清理媒体服务器侧的占位文件（strm）。
 
@@ -938,20 +1141,37 @@ class EmbySyncDel(_PluginBase):
         占位文件不清理时，媒体服务器下次扫描会把条目重新加回媒体库。
         """
         if not media_path or Path(str(media_path)).suffix.lower() != ".strm":
-            return []
-        server_roots = [server for server, _ in parse_mappings(self._library_path)]
-        if server_roots and not is_within(media_path, server_roots):
-            return [f"• 跳过占位文件（不在媒体服务器映射范围内）：{media_path}"]
+            return [], True
+        server_roots = [server for server, _ in cached_mappings(self._library_path)]
+        # fail-closed：没配置媒体库路径映射时**不能**跳过这道护栏 ——
+        # 否则事件里的任意 .strm 路径都会被无条件删除（实测可删到映射范围外）。
+        if not server_roots:
+            return [f"• 跳过占位文件（未配置媒体库路径映射，无法校验路径范围）：{media_path}"], True
+        if not is_within(media_path, server_roots):
+            return [f"• 跳过占位文件（不在媒体服务器映射范围内）：{media_path}"], True
         target = Path(str(media_path).replace("\\", "/"))
         if not target.exists():
-            return [f"• 占位文件不存在或未挂载到 MoviePilot，已跳过：{media_path}"]
+            # MP 容器内看不到媒体服务器挂载是环境事实（不是失败）→ 只提示、不阻塞
+            return [f"• 占位文件不存在或未挂载到 MoviePilot，已跳过：{media_path}"], True
         return self._remove_file(media_path, "占位文件(strm)")
 
-    def _prune_empty_dirs(self, directory: Path) -> None:
-        """自底向上删除空目录，遇到非空目录或受保护目录即停止。"""
-        protected = {Path(os.path.abspath(root)) for root in self._allowed_roots()}
-        current = Path(os.path.abspath(str(directory)))
-        for _ in range(8):
+    def _prune_empty_dirs(self, directory: Path, roots: Optional[List[str]] = None) -> None:
+        """自底向上删除空目录，遇到非空目录、受保护目录或超出给定根即停止。
+
+        :param roots: 允许剪枝的根目录；默认用媒体库映射目标。**根为空时一律不剪枝**（fail-closed）。
+        """
+        protected = {Path(os.path.abspath(str(root).replace("\\", "/")))
+                     for root in (self._allowed_roots() if roots is None else roots)}
+        # 没有受保护根（未配置映射）时**一律不剪枝**：否则 protected 为空集，
+        # 会沿父目录一路 rmdir 到媒体库之外（最多 MAX_PRUNE_DEPTH 层）。
+        if not protected:
+            return
+        current = Path(os.path.abspath(str(directory).replace("\\", "/")))
+        if not any(current == root or str(current).startswith(str(root).rstrip("/") + "/")
+                   or str(root).startswith(str(current).rstrip("/") + "/")
+                   for root in protected):
+            return
+        for _ in range(MAX_PRUNE_DEPTH):
             if current in protected or not current.is_dir():
                 return
             try:
@@ -978,7 +1198,7 @@ class EmbySyncDel(_PluginBase):
             target_path: str,
             media_source: MediaSource,
             media_id: str,
-            media_type: str,
+            is_tv: bool,
     ) -> List[Any]:
         """
         查找与删除事件匹配的整理记录。
@@ -986,37 +1206,41 @@ class EmbySyncDel(_PluginBase):
         顺序：身份精确查询 → 目录 / 文件名主干兜底；无论走哪条路径，最终都要求
         记录与事件指向同一份媒体（见 :func:`same_media`），因此后缀差异不影响匹配。
         """
-        is_tv = media_type not in ("Movie", "MOV", "Video", "")
         candidates: List[Any] = []
 
-        # ① 按媒体身份查询
-        try:
-            records, _ = self._transferhis.query(
-                TransferHistoryFilter(media_source=media_source, media_id=str(media_id)),
-                QueryPageRequest(page=1, count=RECORD_QUERY_PAGE_SIZE),
-            )
-            candidates.extend(records or [])
-        except Exception as err:  # noqa: BLE001 - 契约变化时退回文本查询
-            logger.warning(f"联动删除：按媒体身份查询整理记录失败，改用文本匹配：{err}")
+        # ① 按媒体身份查询（身份缺失时不要拿字符串 "None" 去查，那只会污染候选集）
+        if media_source and media_id and str(media_id) not in ("None", ""):
             try:
                 records, _ = self._transferhis.query(
-                    TransferHistoryFilter(text=str(media_id)),
+                    TransferHistoryFilter(media_source=media_source, media_id=str(media_id)),
                     QueryPageRequest(page=1, count=RECORD_QUERY_PAGE_SIZE),
                 )
                 candidates.extend(records or [])
-            except Exception as inner:  # noqa: BLE001
-                logger.error(f"联动删除：整理记录查询失败：{inner}")
+            except Exception as err:  # noqa: BLE001 - 契约变化时退回文本查询
+                logger.warning(f"联动删除：按媒体身份查询整理记录失败，改用文本匹配：{err}")
+                try:
+                    records, _ = self._transferhis.query(
+                        TransferHistoryFilter(text=str(media_id)),
+                        QueryPageRequest(page=1, count=RECORD_QUERY_PAGE_SIZE),
+                    )
+                    candidates.extend(records or [])
+                except Exception as inner:  # noqa: BLE001
+                    logger.error(f"联动删除：整理记录查询失败：{inner}")
 
         # ② 目录 / 文件名主干匹配（strm 兼容的关键）
-        matched = [r for r in candidates if same_media(r.dest, target_path, is_tv)]
+        matched = [r for r in candidates
+                   if same_media(r.dest, target_path, is_tv,
+                                 getattr(r, "title", None), media_name)]
 
         # ③ 仍未命中时，用映射后的目录名做文本包含查询兜底
         if not matched:
-            keywords = [keyword for keyword in {
-                Path(target_path).stem if target_path else "",
-                Path(target_path).parent.name if target_path else "",
-                media_name,
-            } if keyword]
+            # 顺序固定（原先用 set，迭代顺序依赖哈希，匹配结果不稳定）：先精确后宽松
+            keywords = []
+            for _kw in (media_name,
+                        Path(target_path).stem if target_path else "",
+                        Path(target_path).parent.name if target_path else ""):
+                if _kw and _kw not in keywords:
+                    keywords.append(_kw)
             for keyword in keywords:
                 try:
                     records, _ = self._transferhis.query(
@@ -1030,7 +1254,8 @@ class EmbySyncDel(_PluginBase):
                     if record in candidates:
                         continue
                     candidates.append(record)
-                    if same_media(record.dest, target_path, is_tv):
+                    if same_media(record.dest, target_path, is_tv,
+                                  getattr(record, "title", None), media_name):
                         matched.append(record)
                 if matched:
                     break
@@ -1048,18 +1273,28 @@ class EmbySyncDel(_PluginBase):
     # 下载任务
     # ------------------------------------------------------------------ #
 
-    def _handle_torrents(self, record: Any) -> List[str]:
-        """处理整理记录关联的下载任务：主任务 + 转种 + 辅种。"""
+    def _handle_torrents(self, record: Any) -> Tuple[List[str], bool]:
+        """处理整理记录关联的下载任务：主任务 + 转种 + 辅种。返回 (结果行, 是否全部处理成功)。"""
         lines: List[str] = []
         torrent_hash = getattr(record, "download_hash", None)
         if not torrent_hash:
-            return lines
+            return lines, True
+        if not self.chain:
+            # 清理链不可用时不能装作"没有下载任务"：否则整理记录被删、任务却留在下载器里，
+            # 既没清掉也失去重试依据。
+            lines.append(f"• 下载任务未处理（清理链不可用）：{torrent_hash}")
+            logger.error(f"联动删除：清理链不可用，下载任务 {torrent_hash} 未处理")
+            return lines, False
         downloader = self._downloader_of(torrent_hash) or self._default_downloader
-        lines.extend(self._handle_one_torrent(str(torrent_hash), downloader, self._torrent_action))
-
+        ok_all = True
+        msg, ok = self._handle_one_torrent(str(torrent_hash), downloader, self._torrent_action)
+        lines.extend(msg)
+        ok_all = ok_all and ok
         if self._del_seed:
-            lines.extend(self._handle_seeds(str(torrent_hash), set()))
-        return lines
+            msg, ok = self._handle_seeds(str(torrent_hash), set())
+            lines.extend(msg)
+            ok_all = ok_all and ok
+        return lines, ok_all
 
     def _downloader_of(self, torrent_hash: str) -> Optional[str]:
         """通过下载历史反查种子所属下载器。"""
@@ -1078,11 +1313,12 @@ class EmbySyncDel(_PluginBase):
 
     def _handle_one_torrent(
             self, torrent_hash: str, downloader: Optional[str], action: str
-    ) -> List[str]:
-        """按配置删除或暂停一个下载任务，并同步处理转种记录。"""
+    ) -> Tuple[List[str], bool]:
+        """按配置删除或暂停一个下载任务，并同步处理转种记录。返回 (结果行, 是否成功)。"""
         lines: List[str] = []
         if not torrent_hash:
-            return lines
+            return lines, True
+        ok_all = True
 
         # 转种记录：源种与目标种都要处理
         transfer = None
@@ -1095,14 +1331,20 @@ class EmbySyncDel(_PluginBase):
             target_downloader = transfer.get("to_download")
             target_hash = transfer.get("to_download_id")
             if target_hash:
-                lines.extend(self._act_torrent(str(target_hash), target_downloader, action, "转种任务"))
+                msg, ok = self._act_torrent(str(target_hash), target_downloader, action, "转种任务")
+                lines.extend(msg)
+                ok_all = ok_all and ok
             source_downloader = transfer.get("from_download")
             source_hash = transfer.get("from_download_id")
             if source_hash and source_hash != torrent_hash:
-                lines.extend(self._act_torrent(str(source_hash), source_downloader, action, "源下载任务"))
+                msg, ok = self._act_torrent(str(source_hash), source_downloader, action, "源下载任务")
+                lines.extend(msg)
+                ok_all = ok_all and ok
 
-        lines.extend(self._act_torrent(torrent_hash, downloader, action))
-        return lines
+        msg, ok = self._act_torrent(torrent_hash, downloader, action)
+        lines.extend(msg)
+        ok_all = ok_all and ok
+        return lines, ok_all
 
     def _act_torrent(
             self,
@@ -1110,32 +1352,37 @@ class EmbySyncDel(_PluginBase):
             downloader: Optional[str],
             action: str,
             label: str = "下载任务",
-    ) -> List[str]:
-        """对下载器执行删除 / 暂停。"""
-        if not torrent_hash or not self.chain:
-            return []
+    ) -> Tuple[List[str], bool]:
+        """对下载器执行删除 / 暂停。返回 (结果行, 是否成功)。"""
+        if not torrent_hash:
+            return [], True
+        if not self.chain:
+            return [f"• {label}未处理（清理链不可用）：{torrent_hash}"], False
         try:
             if action == ACTION_STOP:
                 self.chain.stop_torrents(hashs=torrent_hash, downloader=downloader)
-                return [f"• 已暂停{label}：{torrent_hash}"]
+                return [f"• 已暂停{label}：{torrent_hash}"], True
             self.chain.remove_torrents(hashs=torrent_hash, delete_file=True, downloader=downloader)
-            return [f"• 已删除{label}：{torrent_hash}"]
+            return [f"• 已删除{label}：{torrent_hash}"], True
         except Exception as err:  # noqa: BLE001
             logger.error(f"联动删除：处理{label} {torrent_hash} 失败：{err}")
-            return [f"• 处理{label}失败：{torrent_hash}（{err}）"]
+            return [f"• 处理{label}失败：{torrent_hash}（{err}）"], False
 
-    def _handle_seeds(self, torrent_hash: str, visited: set, depth: int = 0) -> List[str]:
-        """递归处理辅种记录（读取辅种插件保存的关联任务）。"""
+    def _handle_seeds(self, torrent_hash: str, visited: set, depth: int = 0) -> Tuple[List[str], bool]:
+        """递归处理辅种记录（读取辅种插件保存的关联任务）。返回 (结果行, 是否成功)。"""
         lines: List[str] = []
         if depth >= MAX_SEED_DEPTH or not torrent_hash or torrent_hash in visited:
-            return lines
+            return lines, True
         visited.add(torrent_hash)
         try:
             seed_history = self.get_data(key=torrent_hash, plugin_id="IYUUAutoSeed") or []
-        except Exception:  # noqa: BLE001 - 未安装辅种插件属正常情况
-            return lines
+        except Exception as err:  # noqa: BLE001
+            # 区分"未安装辅种插件"（正常）与"读取真实失败"（要留痕，否则用户以为辅种已清）
+            logger.warning(f"联动删除：读取辅种记录 {torrent_hash} 失败：{err}")
+            return lines, True
         if not isinstance(seed_history, list):
-            return lines
+            return lines, True
+        ok_all = True
         for item in seed_history:
             if not isinstance(item, dict):
                 continue
@@ -1144,21 +1391,117 @@ class EmbySyncDel(_PluginBase):
             if isinstance(torrents, str):
                 torrents = [torrents]
             for seed_hash in torrents or []:
-                lines.extend(self._act_torrent(str(seed_hash), downloader, self._torrent_action, "辅种任务"))
-                lines.extend(self._handle_seeds(str(seed_hash), visited, depth + 1))
-        return lines
+                msg, ok = self._act_torrent(str(seed_hash), downloader, self._torrent_action, "辅种任务")
+                lines.extend(msg)
+                ok_all = ok_all and ok
+                msg, ok = self._handle_seeds(str(seed_hash), visited, depth + 1)
+                lines.extend(msg)
+                ok_all = ok_all and ok
+        return lines, ok_all
 
     # ------------------------------------------------------------------ #
     # 工具
     # ------------------------------------------------------------------ #
 
+    def _state_lock(self) -> threading.Lock:
+        """实例级锁：审计历史与幂等缓存的读-改-写必须是原子的（并发事件会互相覆盖）。"""
+        lock = getattr(self, "_state_lock_obj", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._state_lock_obj = lock
+        return lock
+
+    def _event_seen_recently(self, event_data: Any) -> bool:
+        """同一事件在 EVENT_DEDUP_WINDOW 秒内重复到达时返回 True（幂等）。"""
+        key = "|".join([
+            str(getattr(event_data, "event", "") or ""),
+            str(getattr(event_data, "item_name", "") or ""),
+            str(getattr(event_data, "item_path", "") or ""),
+        ])
+        if not key.replace("|", "").strip():
+            return False
+        now = time.time()
+        with self._state_lock():
+            cache = getattr(self, "_recent_events", None)
+            if not isinstance(cache, dict):
+                cache = {}
+                self._recent_events = cache
+            for stale in [k for k, ts in cache.items() if now - ts > EVENT_DEDUP_WINDOW]:
+                cache.pop(stale, None)
+            if key in cache:
+                return True
+            cache[key] = now
+        return False
+
+    def _state_lock(self) -> threading.Lock:
+        """实例级锁：审计历史与幂等缓存的读-改-写必须是原子的（并发事件会互相覆盖）。"""
+        lock = getattr(self, "_state_lock_obj", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._state_lock_obj = lock
+        return lock
+
+    def _event_seen_recently(self, event_data: Any) -> bool:
+        """同一事件在 EVENT_DEDUP_WINDOW 秒内重复到达时返回 True（幂等）。"""
+        key = "|".join([
+            str(getattr(event_data, "event", "") or ""),
+            str(getattr(event_data, "item_name", "") or ""),
+            str(getattr(event_data, "item_path", "") or ""),
+        ])
+        if not key.replace("|", "").strip():
+            return False
+        now = time.time()
+        with self._state_lock():
+            cache = getattr(self, "_recent_events", None)
+            if not isinstance(cache, dict):
+                cache = {}
+                self._recent_events = cache
+            for stale in [k for k, ts in cache.items() if now - ts > EVENT_DEDUP_WINDOW]:
+                cache.pop(stale, None)
+            if key in cache:
+                return True
+            cache[key] = now
+        return False
+
+    def _source_allowed(self, path: str) -> bool:
+        """源文件是否允许删除。
+
+        配置了「源文件根目录」(source_roots) 时**必须**落在其中一个根目录内；
+        未配置时保持兼容（放行）—— 源文件路径来自 MoviePilot 自己的整理记录，属可信来源，
+        需要更严格约束时再填这个配置。
+        """
+        roots = [line.strip() for line in str(getattr(self, "_source_roots", "") or "").splitlines()
+                 if line.strip() and not line.strip().startswith("#")]
+        if not roots:
+            return True
+        return is_within(path, roots)
+
     def _allowed_roots(self) -> List[str]:
-        """允许删除的根目录：媒体库映射目标 + 源文件映射目标。"""
-        roots = [local for _, local in parse_mappings(self._library_path)]
+        """允许删除的根目录：**只包含媒体库映射**的 MoviePilot 侧目标。
+
+        源文件（整理记录的 src）走单独的可选配置 ``source_roots``，见 :meth:`_source_allowed`。
+        """
+        roots = [local for _, local in cached_mappings(self._library_path)]
         return roots
 
+    def _source_allowed(self, path: str) -> bool:
+        """源文件是否允许删除。
+
+        配置了「源文件根目录」(source_roots) 时**必须**落在其中一个根目录内；
+        未配置时保持兼容（放行），但会在结果里提示 —— 源文件路径来自 MoviePilot 自己的整理记录，
+        属可信来源，需要更严格约束时再填这个配置。
+        """
+        roots = [line.strip() for line in str(getattr(self, "_source_roots", "") or "").splitlines()
+                 if line.strip() and not line.strip().startswith("#")]
+        if not roots:
+            return True
+        return is_within(path, roots)
+
     def _excluded(self, media_path: str) -> bool:
-        """判断媒体路径是否命中排除规则。"""
+        """判断媒体路径是否命中排除规则（**子串包含**，不是前缀）。
+
+        注意作用对象是**媒体服务器上报的原始路径**（未做映射），配置时按媒体服务器侧路径填写。
+        """
         if not self._exclude_path:
             return False
         for line in str(self._exclude_path).splitlines():

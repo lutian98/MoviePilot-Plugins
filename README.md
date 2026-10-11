@@ -23,7 +23,7 @@
 
 ## Emby 联动删除
 
-`EmbySyncDel` · v1.1.1
+`EmbySyncDel` · v1.4.0
 
 | 项目 | 说明 |
 | --- | --- |
@@ -97,12 +97,13 @@ https://github.com/lutian98/MoviePilot-Plugins
 ```
 媒体服务器删除条目
       ↓ 删除事件（Webhook）
-MoviePilot /api/v1/webhook
-      ↓ 事件总线
-本插件 sync_del_by_webhook
+      ├─【主链路】直投插件自带入口（推荐，Emby 用户必须配）
+      │     POST /api/v1/plugin/EmbySyncDel/emby_webhook?key=***
+      │     （Emby 发 JSON，而 MP 自带的 Emby 解析器只认表单字段、会静默丢弃 JSON）
+      └─【兼容链路】MoviePilot /api/v1/webhook → 事件总线 → 本插件 sync_del_by_webhook
       ↓ ① 事件名过滤（可配置）
       ↓ ② 排除路径过滤
-      ↓ ③ 媒体身份解析（事件 → ProviderIds 兜底；拿不到则告警退出）
+      ↓ ③ 媒体身份解析（事件 → ProviderIds → 媒体路径匹配，叠加标题防误删校验）
       ↓ ④ 路径映射 → 查找整理记录（身份查询 + 目录 / 文件名主干匹配）
       ↓ ⑤ 逐条处理：
             删除媒体库文件 → 删除源文件 → 清理空目录
