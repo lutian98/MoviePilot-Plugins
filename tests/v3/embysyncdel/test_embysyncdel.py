@@ -792,6 +792,12 @@ class TestNotifyStyle(unittest.TestCase):
         instance._library_path = ""
         self.assertTrue(instance._in_library_scope("/anywhere/whatever.strm"))
 
+    def test_get_api_registers_nothing_and_class_is_concrete(self):
+        """get_api 必须是空实现（直投入口已移除），且类不能残留抽象方法（否则 MP 加载失败）。"""
+        self.assertEqual(plugin.EmbySyncDel.get_api(), [])
+        leftover = getattr(plugin.EmbySyncDel, "__abstractmethods__", frozenset())
+        self.assertEqual(set(leftover), set(), f"仍有未实现的宿主抽象方法：{leftover}")
+
 
 if __name__ == "__main__":
     unittest.main()

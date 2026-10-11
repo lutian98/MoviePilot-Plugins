@@ -307,7 +307,7 @@ class EmbySyncDel(_PluginBase):
     # 插件图标（放在仓库 icons/ 目录，填文件名即可）
     plugin_icon = "embysyncdel.png"
     # 插件版本
-    plugin_version = "1.5.0"
+    plugin_version = "1.5.1"
     # 插件作者
     plugin_author = "lutian98"
     # 作者主页
@@ -707,6 +707,16 @@ class EmbySyncDel(_PluginBase):
     # ------------------------------------------------------------------ #
 
     @eventmanager.register(EventType.WebhookMessage)
+    @staticmethod
+    def get_api() -> List[Dict[str, Any]]:
+        """不注册任何插件 API。
+
+        直投入口（``/emby_webhook``）已于 1.5.0 移除，事件只从宿主事件总线进入；
+        但 MoviePilot 的 ``_PluginBase`` 把 ``get_api`` 声明为 abstractmethod，
+        插件必须实现它才能被实例化 —— 故保留这个返回空列表的空实现。
+        """
+        return []
+
     def sync_del_by_webhook(self, event: Event) -> None:
         """媒体服务器删除事件 → 同步清理（外层兜底：异常也留痕）。"""
         try:

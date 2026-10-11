@@ -1,3 +1,11 @@
+## 1.5.1
+
+- **修复 1.5.0 的加载缺陷**：MoviePilot 的 ``_PluginBase`` 把 ``get_api`` 声明为 ``abstractmethod``，
+  1.5.0 移除直投入口时把它一起删了，导致插件类变成抽象类、宿主报"插件加载失败"。
+  现保留一个**不注册任何路由**的空实现（``return []``）—— 功能仍然是删掉的，只是满足宿主契约。
+- **测试桩补上抽象契约**：``tests/app_stub.py`` 的 ``_PluginBase`` 现在与 MoviePilot v3.0.9 一致地
+  把 6 个方法声明为 abstractmethod，少实现一个测试就会失败（此前桩不模拟该约束，故漏检）。
+
 ## 1.5.0
 
 - **移除「直投 Webhook 入口」功能**（`/api/v1/plugin/EmbySyncDel/emby_webhook` 路由及其密钥配置）。

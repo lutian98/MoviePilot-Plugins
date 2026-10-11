@@ -1,3 +1,4 @@
+import abc
 """
 MoviePilot 宿主模块的最小桩实现。
 
@@ -196,13 +197,45 @@ class Response:
         self.data = data
 
 
-class _PluginBase:
-    """插件基类桩：只实现插件用到的宿主能力。"""
+class _PluginBase(abc.ABC):
+    """插件基类桩：只实现插件用到的宿主能力。
+
+    抽象方法**必须与 MoviePilot v3.0.9 的 ``app/sdk/plugin/base.py`` 保持一致**：
+    宿主把 ``init_plugin/get_state/get_api/get_form/get_page/stop_service`` 声明为
+    abstractmethod，插件少实现一个就无法被实例化（宿主只报"插件加载失败"）。
+    桩如果不模拟这个约束，测试就抓不到这类缺陷（1.5.0 就是这么翻车的）。
+    """
 
     def __init__(self):
         self.chain = None
         self._config = {}
         self.messages = []
+
+
+    # --- 宿主抽象契约（与 MoviePilot v3.0.9 对齐，缺一个插件就加载不起来） ---
+    @abc.abstractmethod
+    def init_plugin(self, config: dict = None):  # pragma: no cover - 由子类实现
+        """插件初始化。"""
+
+    @abc.abstractmethod
+    def get_state(self) -> bool:  # pragma: no cover
+        """插件启用状态。"""
+
+    @abc.abstractmethod
+    def get_api(self):  # pragma: no cover
+        """插件 API 注册（无 API 时返回空列表）。"""
+
+    @abc.abstractmethod
+    def get_form(self):  # pragma: no cover
+        """插件配置表单。"""
+
+    @abc.abstractmethod
+    def get_page(self):  # pragma: no cover
+        """插件详情页。"""
+
+    @abc.abstractmethod
+    def stop_service(self):  # pragma: no cover
+        """插件停止。"""
 
     # --- 数据存取（跨插件数据用 PLUGIN_DATA 共享，便于仿真辅种/转种插件） ---
     def save_data(self, key, value):
