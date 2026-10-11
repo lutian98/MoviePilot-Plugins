@@ -1,3 +1,11 @@
+## 1.5.2
+
+- **修复 1.5.1 的连带删除**：`get_api` 恢复时只留空实现，把插件自身的 `/history`（查询历史）
+  和 `/delete_history`（清空历史）两个**只读接口**一起弄丢了（详情页依赖它们）。
+  现精确恢复这两个接口，均要求宿主鉴权（`apikey`）；直投入口 `/emby_webhook` 保持移除、不再注册。
+- 新增用例：断言 `get_api` 暴露的路由**恰好**是 `/history` + `/delete_history`，
+  且不存在任何 webhook 入口或匿名路由。
+
 ## 1.5.1
 
 - **修复 1.5.0 的加载缺陷**：MoviePilot 的 ``_PluginBase`` 把 ``get_api`` 声明为 ``abstractmethod``，

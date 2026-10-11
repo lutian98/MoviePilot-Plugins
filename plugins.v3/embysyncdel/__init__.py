@@ -707,15 +707,30 @@ class EmbySyncDel(_PluginBase):
     # ------------------------------------------------------------------ #
 
     @eventmanager.register(EventType.WebhookMessage)
-    @staticmethod
-    def get_api() -> List[Dict[str, Any]]:
-        """不注册任何插件 API。
+    def get_api(self) -> List[Dict[str, Any]]:
+        """注册插件自身的只读接口。
 
-        直投入口（``/emby_webhook``）已于 1.5.0 移除，事件只从宿主事件总线进入；
-        但 MoviePilot 的 ``_PluginBase`` 把 ``get_api`` 声明为 abstractmethod，
-        插件必须实现它才能被实例化 —— 故保留这个返回空列表的空实现。
+        直投入口（``/emby_webhook``，匿名）已于 1.5.0 **移除**，事件只从宿主事件总线进入；
+        这里只保留插件详情页要用的历史查询/清空接口，且一律要求宿主鉴权（``apikey``）。
+
+        注：``_PluginBase`` 把 ``get_api`` 声明为 abstractmethod，插件必须实现它才能被实例化。
         """
-        return []
+        return [
+            {
+                "path": "/history",
+                "endpoint": self.api_history,
+                "methods": ["GET"],
+                "auth": "apikey",
+                "summary": "查询联动删除历史",
+            },
+            {
+                "path": "/delete_history",
+                "endpoint": self.api_delete_history,
+                "methods": ["GET"],
+                "auth": "apikey",
+                "summary": "清空联动删除历史",
+            },
+        ]
 
     def sync_del_by_webhook(self, event: Event) -> None:
         """媒体服务器删除事件 → 同步清理（外层兜底：异常也留痕）。"""

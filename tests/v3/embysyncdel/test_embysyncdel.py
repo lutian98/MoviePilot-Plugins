@@ -792,9 +792,13 @@ class TestNotifyStyle(unittest.TestCase):
         instance._library_path = ""
         self.assertTrue(instance._in_library_scope("/anywhere/whatever.strm"))
 
-    def test_get_api_registers_nothing_and_class_is_concrete(self):
-        """get_api 必须是空实现（直投入口已移除），且类不能残留抽象方法（否则 MP 加载失败）。"""
-        self.assertEqual(plugin.EmbySyncDel.get_api(), [])
+    def test_get_api_has_no_direct_entry_and_class_is_concrete(self):
+        """直投入口必须彻底消失（不再注册、不得匿名）；历史接口保留；类不能残留抽象方法。"""
+        routes = plugin.EmbySyncDel.get_api(object.__new__(plugin.EmbySyncDel))
+        paths = sorted(r["path"] for r in routes)
+        self.assertEqual(paths, ["/delete_history", "/history"], f"暴露的路由不符：{paths}")
+        self.assertFalse(any("webhook" in p for p in paths), "不应再注册任何 webhook 入口")
+        self.assertFalse(any(r.get("allow_anonymous") for r in routes), "不应有匿名路由")
         leftover = getattr(plugin.EmbySyncDel, "__abstractmethods__", frozenset())
         self.assertEqual(set(leftover), set(), f"仍有未实现的宿主抽象方法：{leftover}")
 
