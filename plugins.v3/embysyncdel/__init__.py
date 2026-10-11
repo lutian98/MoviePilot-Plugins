@@ -50,6 +50,18 @@ from app.sdk.services import DownloaderHelper, MediaServerIdentityHelper
 # 默认接受的事件名（Emby 各版本 / 各通知插件使用的删除事件名并不统一）
 DEFAULT_EVENT_TYPES = "library.deleted,ItemDeleted,item.deleted"
 
+# 界面上给用户勾选的候选事件名（下拉多选）。带中文说明，避免用户对着字符串猜。
+KNOWN_EVENT_TYPES: List[Tuple[str, str]] = [
+    ("library.deleted", "library.deleted —— Emby 新版默认（最常见）"),
+    ("ItemDeleted", "ItemDeleted —— Emby 旧版 / Webhooks 插件老版本"),
+    ("item.deleted", "item.deleted —— 部分 Emby / Jellyfin 版本"),
+    ("library.removed", "library.removed —— Jellyfin 风格"),
+    ("media.deleted", "media.deleted —— 第三方媒体服务器 / 自定义"),
+    ("media_del", "media_del —— Scripter X 等脚本工具"),
+]
+# 自定义补充项（勾选列表里没有的冷门事件名写这里）
+DEFAULT_EVENT_TYPES_EXTRA = ""
+
 # 容器级条目类型：这些事件指的是「文件夹 / 剧集容器」，不是具体影片文件。
 # 实测这类事件大量来自整理换版重建与其它媒体库的清理动作，按目录名匹配极易误删仍在库里的影片。
 # 电影类媒体类型（与 CONTAINER_ITEM_TYPES 并列的单一事实源）。
@@ -82,11 +94,19 @@ RECORD_QUERY_PAGE_SIZE = 200
 # 纯函数（与宿主解耦，便于单元测试）
 # --------------------------------------------------------------------------- #
 
-def parse_event_types(raw: Optional[str]) -> List[str]:
-    """解析接受的事件名清单，逗号分隔，忽略空项与空白。"""
+def parse_event_types(raw: Any) -> List[str]:
+    """解析接受的事件名清单。
+
+    兼容三种存储形态：下拉多选产生的 list、历史配置的逗号分隔字符串、以及混合内容 ——
+    这样老配置不用迁移，用户也能在界面上直接勾选。
+    """
     if not raw:
         return []
-    return [item.strip() for item in str(raw).split(",") if item.strip()]
+    if isinstance(raw, (list, tuple, set)):
+        items = [str(item) for item in raw]
+    else:
+        items = str(raw).replace("\n", ",").split(",")
+    return [item.strip() for item in items if str(item).strip()]
 
 
 def parse_mappings(raw: Optional[str]) -> List[Tuple[str, str]]:
@@ -286,7 +306,7 @@ class EmbySyncDel(_PluginBase):
     # 插件图标（放在仓库 icons/ 目录，填文件名即可）
     plugin_icon = "embysyncdel.png"
     # 插件版本
-    plugin_version = "1.4.0"
+    plugin_version = "1.4.1"
     # 插件作者
     plugin_author = "lutian98"
     # 作者主页
@@ -327,6 +347,7 @@ class EmbySyncDel(_PluginBase):
         self._notify = False
         self._dry_run = True
         self._event_types = DEFAULT_EVENT_TYPES
+        self._event_types_extra = DEFAULT_EVENT_TYPES_EXTRA
         self._library_path = ""
         self._exclude_path = ""
         self._source_roots = ""
@@ -340,7 +361,14 @@ class EmbySyncDel(_PluginBase):
             self._enabled = bool(config.get("enabled"))
             self._notify = bool(config.get("notify"))
             self._dry_run = bool(config.get("dry_run", True))
-            self._event_types = str(config.get("event_types") or DEFAULT_EVENT_TYPES)
+            raw_events = config.get("event_types")
+            parsed_events = parse_event_types(raw_events)
+            if parsed_events:
+                # 界面多选存的是 list，老配置存的是逗号分隔字符串 —— 统一成字符串存储，兼容两边
+                self._event_types = ",".join(parsed_events) if isinstance(raw_events, str) else parsed_events
+            else:
+                self._event_types = DEFAULT_EVENT_TYPES
+            self._event_types_extra = str(config.get("event_types_extra") or "")
             self._library_path = str(config.get("library_path") or "")
             self._exclude_path = str(config.get("exclude_path") or "")
             self._source_roots = str(config.get("source_roots") or "")
@@ -364,6 +392,7 @@ class EmbySyncDel(_PluginBase):
                 "notify": self._notify,
                 "dry_run": self._dry_run,
                 "event_types": self._event_types,
+                "event_types_extra": self._event_types_extra,
                 "library_path": self._library_path,
                 "exclude_path": self._exclude_path,
                 "del_source": self._del_source,
@@ -581,13 +610,17 @@ class EmbySyncDel(_PluginBase):
                                 "props": {"cols": 12},
                                 "content": [
                                     {
-                                        "component": "VTextarea",
+                                        "component": "VSelect",
                                         "props": {
                                             "model": "event_types",
-                                            "rows": 2,
-                                            "label": "接受的删除事件名",
-                                            "placeholder": DEFAULT_EVENT_TYPES,
-                                            "hint": "逗号分隔；不确定媒体服务器发哪个事件名时，把三种都留着即可。",
+                                            "label": "接受哪些删除事件",
+                                            "multiple": True,
+                                            "chips": True,
+                                            "clearable": True,
+                                            "items": [{"title": desc, "value": value}
+                                                      for value, desc in KNOWN_EVENT_TYPES],
+                                            "hint": "勾选媒体服务器会发出来的删除事件名；不确定就三个都勾着。"
+                                                    "列表里没有的冷门事件名写在下面「自定义」里。",
                                             "persistent-hint": True,
                                         },
                                     }
@@ -605,6 +638,22 @@ class EmbySyncDel(_PluginBase):
                                             "label": "媒体库路径映射",
                                             "placeholder": "媒体服务器路径#MoviePilot路径（一行一个）",
                                             "hint": "例如：/mnt/user/Media/Strm/Media#/downloads/link",
+                                            "persistent-hint": True,
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "event_types_extra",
+                                            "label": "自定义删除事件名（可选）",
+                                            "placeholder": "留空即可；多个用英文逗号分隔",
+                                            "hint": "上拉列表里没有的事件名写这里，会和勾选项一起生效。",
                                             "persistent-hint": True,
                                         },
                                     }
@@ -750,6 +799,7 @@ class EmbySyncDel(_PluginBase):
             "dry_run": True,
             "del_history": False,
             "event_types": DEFAULT_EVENT_TYPES,
+            "event_types_extra": DEFAULT_EVENT_TYPES_EXTRA,
             "library_path": "",
             "exclude_path": "",
             "del_source": True,
@@ -794,7 +844,8 @@ class EmbySyncDel(_PluginBase):
             return
 
         event_type = str(event_data.event or "")
-        allowed = parse_event_types(self._event_types)
+        allowed = (parse_event_types(self._event_types)
+                   + parse_event_types(getattr(self, "_event_types_extra", "")))
         media_name = str(event_data.item_name or "").strip()
         media_path = str(event_data.item_path or "").replace("\\", "/")
         media_type = str(event_data.media_type or event_data.item_type or "")

@@ -687,5 +687,65 @@ def _event_for(media_name):
     )
 
 
+class TestEventTypeSelection(unittest.TestCase):
+    """事件名改为"下拉勾选 + 自定义补充"后的兼容性。"""
+
+    def test_parse_accepts_list_and_string(self):
+        self.assertEqual(plugin.parse_event_types(["a", "b"]), ["a", "b"])
+        self.assertEqual(plugin.parse_event_types("a,b"), ["a", "b"])
+        self.assertEqual(plugin.parse_event_types("a\nb"), ["a", "b"])
+        self.assertEqual(plugin.parse_event_types([]), [])
+        self.assertEqual(plugin.parse_event_types(None), [])
+
+    def test_form_uses_multi_select_with_known_candidates(self):
+        import json
+        instance, _ = build_plugin()
+        form, defaults = instance.get_form()
+        flat = json.dumps(form, ensure_ascii=False)
+        self.assertIn('"model": "event_types"', flat)
+        self.assertIn('"multiple": true', flat)
+        for value, _desc in plugin.KNOWN_EVENT_TYPES:
+            self.assertIn(value, flat, f"候选事件名 {value} 应出现在下拉里")
+        self.assertIn('"model": "event_types_extra"', flat)
+        self.assertIn("event_types_extra", defaults)
+
+    def test_list_form_config_is_honoured(self):
+        """界面多选存成 list 后，事件过滤必须照样生效。"""
+        rec = FakeRecord(71001, "某片", "/downloads/link/Movie/中国电影/某片 (2016)/某片 (2016) - 1080p.mkv")
+        instance, notifies = build_plugin([rec])
+        instance._event_types = ["library.deleted"]
+        instance._event_types_extra = ""
+        instance._webhook_key = "k"
+        # 勾选项之内 → 处理
+        ok = instance.api_emby_webhook(
+            {"Event": "library.deleted", "Item": {"Type": "Movie", "Name": "某片", "ProductionYear": 2016,
+                                                  "Path": "/mnt/user/Media/Strm/Media/Movie/中国电影/某片 (2016)/"
+                                                          "某片 (2016) - 1080p.strm"}}, key="k")
+        self.assertEqual(ok.get("msg"), "accepted")
+        import time as _t
+        _t.sleep(0.5)
+        stages = [x.get("stage") for x in (instance.get_data("history") or [])]
+        self.assertIn("done", stages)          # 演练模式（默认）→ done
+        # 未勾选的事件名 → 忽略
+        instance._handle_event_data(plugin.SimpleNamespace(
+            event="ItemDeleted", item_name="另一件", item_path="/x/y.strm",
+            media_type="Movie", media_source=None, media_id=None, json_object={}))
+        stages = [x.get("stage") for x in (instance.get_data("history") or [])]
+        self.assertIn("ignored", stages)
+
+    def test_custom_event_name_takes_effect(self):
+        instance, notifies = build_plugin()
+        instance._event_types = ["library.deleted"]
+        instance._event_types_extra = "my.custom.event"
+        instance._handle_event_data(plugin.SimpleNamespace(
+            event="my.custom.event", item_name="某片",
+            item_path="/mnt/user/Media/Strm/Media/Movie/中国电影/某片 (2016)/某片 (2016) - 1080p.strm",
+            media_type="Movie", media_source=None, media_id=None, json_object={}))
+        import time as _t
+        _t.sleep(0.4)
+        stages = [x.get("stage") for x in (instance.get_data("history") or [])]
+        self.assertNotIn("ignored", stages, "自定义事件名应当被接受")
+
+
 if __name__ == "__main__":
     unittest.main()
