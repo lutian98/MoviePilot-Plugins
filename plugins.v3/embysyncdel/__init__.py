@@ -309,7 +309,7 @@ class EmbySyncDel(_PluginBase):
     # 插件图标（放在仓库 icons/ 目录，填文件名即可）
     plugin_icon = "embysyncdel.png"
     # 插件版本
-    plugin_version = "1.4.3"
+    plugin_version = "1.4.4"
     # 插件作者
     plugin_author = "lutian98"
     # 作者主页
@@ -493,10 +493,12 @@ class EmbySyncDel(_PluginBase):
         if not isinstance(payload, dict) or not payload:
             self._record_event("api_rejected", "直投 webhook 报文体为空或非 JSON 对象", "")
             return {"ok": False, "msg": "bad body"}
-        event_data = self._event_data_from_payload(payload)
-        if not getattr(event_data, "event", ""):
+        if not self._payload_event_name(payload):
             self._record_event("api_rejected", "直投 webhook 报文缺少 Event 字段", "")
             return {"ok": False, "msg": "no event"}
+        items = self._payload_items(payload) or [{}]
+        event_datas = [self._event_data_from_payload(payload, item=it) for it in items]
+        event_data = event_datas[0]
         # 标记来源，便于在历史里区分「媒体服务器直投」与「宿主事件」
         self._record_event(
             "api_received",
@@ -506,20 +508,50 @@ class EmbySyncDel(_PluginBase):
         )
 
         def _run() -> None:
-            try:
-                self._handle_event_data(event_data)
-            except Exception as err:  # noqa: BLE001
-                logger.error(f"联动删除：直投 webhook 处理异常：{err}")
-                self._record_event(
-                    "error", f"直投 webhook 处理异常：{type(err).__name__}: {err}"
-                )
+            for data in event_datas:
+                try:
+                    self._handle_event_data(data)
+                except Exception as err:  # noqa: BLE001
+                    logger.error(f"联动删除：直投 webhook 处理异常：{err}")
+                    self._record_event(
+                        "error", f"直投 webhook 处理异常：{type(err).__name__}: {err}"
+                    )
 
         threading.Thread(target=_run, daemon=True).start()
         return {"ok": True, "msg": "accepted", "event": getattr(event_data, "event", "")}
 
-    def _event_data_from_payload(self, payload: Dict[str, Any]) -> Any:
+    @staticmethod
+    def _payload_event_name(payload: Dict[str, Any]) -> str:
+        """事件名：兼容各家模板的写法（Event / event / eventType / type）。"""
+        for key in ("Event", "event", "eventType", "type"):
+            value = payload.get(key)
+            if value:
+                return str(value)
+        return ""
+
+    @staticmethod
+    def _payload_items(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """报文里的条目：既支持单个 Item，也支持一次报多个的 Items 列表。
+
+        为什么必须支持列表：Emby 删掉一个目录（例如一季剧集）时，
+        部分模板会把受影响的条目放在 ``Items`` 数组里一次发出；只认 ``Item``
+        会把这类事件整条丢掉（日志里表现为「报文缺少 Event」或「缺少媒体路径」）。
+        """
+        for key in ("Item", "item"):
+            item = payload.get(key)
+            if isinstance(item, dict) and item:
+                return [item]
+        for key in ("Items", "items"):
+            items = payload.get(key)
+            if isinstance(items, list):
+                return [x for x in items if isinstance(x, dict)]
+        return []
+
+    def _event_data_from_payload(self, payload: Dict[str, Any], item: Optional[Dict[str, Any]] = None) -> Any:
         """把媒体服务器原始报文整理成宿主事件对象（与 MP 解析器同形），复用同一条处理链。"""
-        item = payload.get("Item") or payload.get("item") or {}
+        if item is None:
+            item = self._payload_items(payload)
+            item = item[0] if item else {}
         if not isinstance(item, dict):
             item = {}
         name = str(item.get("Name") or item.get("name") or "").strip()
@@ -536,7 +568,7 @@ class EmbySyncDel(_PluginBase):
                 logger.warning(f"联动删除：报文 ProviderIds 解析失败：{err}")
         item_type = str(item.get("Type") or item.get("type") or "")
         return SimpleNamespace(
-            event=str(payload.get("Event") or payload.get("event") or ""),
+            event=self._payload_event_name(payload),
             item_type=item_type,
             media_type=item_type,
             item_name=name,
