@@ -861,5 +861,33 @@ class TestPayloadTolerance(unittest.TestCase):
         self.assertNotIn("api_rejected", stages)
 
 
+class TestNotifyStyle(unittest.TestCase):
+    """通知写法对齐：标题带【插件名】前缀；超出媒体库映射范围的事件不告警。"""
+
+    def test_title_carries_plugin_prefix(self):
+        """前缀逻辑在真实的 _notify_result 里（测试桩会替换掉实例方法，故直接调用类方法）。"""
+        instance, _ = build_plugin()
+        sent = []
+        instance.post_message = lambda **kw: sent.append(kw)
+        instance._notify = True
+        plugin.EmbySyncDel._notify_result(instance, title="✅ 测试标题", text="内容")
+        self.assertEqual(len(sent), 1, "应发出 1 条通知")
+        self.assertTrue(str(sent[0]["title"]).startswith("【Emby联动删除】"), sent[0]["title"])
+        self.assertEqual(sent[0]["mtype"], plugin.MessageType.Plugin)
+
+    def test_out_of_scope_path_is_not_notified(self):
+        instance, _ = build_plugin()
+        instance._library_path = "/mnt/user/Media/Strm/Media#/downloads/link"
+        self.assertFalse(instance._in_library_scope("/mnt/user/Media/JAV/某番号/某番号.strm"))
+        self.assertTrue(instance._in_library_scope("/downloads/link/Movie/欧美电影/某片 (1999)/x.strm"))
+        self.assertTrue(instance._in_library_scope("/downloads/link/x.strm"))
+
+    def test_unknown_mapping_keeps_warning_behavior(self):
+        """读不到映射时 fail-open：保持原有告警，避免静默漏报。"""
+        instance, _ = build_plugin()
+        instance._library_path = ""
+        self.assertTrue(instance._in_library_scope("/anywhere/whatever.strm"))
+
+
 if __name__ == "__main__":
     unittest.main()

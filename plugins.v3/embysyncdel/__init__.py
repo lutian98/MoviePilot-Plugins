@@ -309,7 +309,7 @@ class EmbySyncDel(_PluginBase):
     # 插件图标（放在仓库 icons/ 目录，填文件名即可）
     plugin_icon = "embysyncdel.png"
     # 插件版本
-    plugin_version = "1.4.4"
+    plugin_version = "1.4.5"
     # 插件作者
     plugin_author = "lutian98"
     # 作者主页
@@ -1014,8 +1014,14 @@ class EmbySyncDel(_PluginBase):
             )
             logger.warning(message)
             self._record_event("no_record", message, media_name, media_id)
-            self._notify_result(title="⚠️ 联动删除未找到整理记录", text=message,
-                                image=self._fallback_image())
+            if self._in_library_scope(target_path):
+                self._notify_result(title="⚠️ 联动删除未找到整理记录", text=message,
+                                    image=self._fallback_image())
+            else:
+                self._record_event(
+                    "out_of_scope",
+                    f"删除事件不在媒体库映射范围内（不告警，仅记录）：{target_path}",
+                    media_name, media_id)
             return
 
         # 演练与实跑必须用**同一份**待处理清单：护栏（防误删校验）在分支之前统一应用，
@@ -1758,6 +1764,22 @@ class EmbySyncDel(_PluginBase):
         except Exception as err:  # noqa: BLE001
             logger.error(f"联动删除：写入历史失败：{err}")
 
+    def _in_library_scope(self, target_path: str) -> bool:
+        """事件映射后的路径是否落在媒体库映射范围内。
+
+        不在范围内（例如 JAV 库这类不归 MoviePilot 管的目录）时，本插件本就不会有任何
+        整理记录可清理，没必要每次都发"未找到整理记录"告警 —— 只记日志，保持通知干净。
+        """
+        try:
+            roots = [local for _, local in cached_mappings(self._library_path)]
+        except Exception as err:  # noqa: BLE001
+            logger.error(f"联动删除：读取路径映射失败：{err}")
+            return True  # 读不到映射时保持原有告警行为（宁可多说一句，不可静默漏报）
+        if not roots:
+            return True
+        norm = str(target_path or "")
+        return any(norm.startswith(str(r).rstrip("/")) for r in roots if r)
+
     def _notify_result(
             self,
             title: str,
@@ -1769,7 +1791,7 @@ class EmbySyncDel(_PluginBase):
         if not self._notify:
             return
         try:
-            self.post_message(mtype=mtype, title=title, text=text, image=image)
+            self.post_message(mtype=mtype, title=f"【Emby联动删除】{title}", text=text, image=image)
         except Exception as err:  # noqa: BLE001
             logger.error(f"联动删除：发送通知失败：{err}")
 
