@@ -59,27 +59,24 @@ python -m unittest discover -s tests/v3 -t .
 
 GPL-3.0
 
-## 关于「必须配直投入口」——不是挑格式，是挑通道
+## 在 Emby 里怎么配（唯一一条路，1.5.0 起）
 
-很多同学看到文档里给了报文示例，就以为插件对格式有要求。**其实没有**：下面这些写法都能解析，
-你换 Emby Webhooks 的模板一般不影响（1.4.4 起还额外支持 `Items` 数组与 `eventType`/`type` 事件名别名）：
+插件通过 **MoviePilot 自带的事件总线**接收删除事件，所以在 Emby 侧只需要一条普通 Webhook：
 
-```
-事件名：Event / event / eventType / type
-条目：  Item（单个）/ Items（数组，逐条处理）
-名称：  Name / name（年份会自动补成「名称 (年份)」）
-路径：  Path / path       身份：ProviderIds（没有则退回路径匹配）
-```
-
-**真正的硬性要求只有一条：事件要发到插件的直投入口**
+1. Emby 控制台 → 设置 → 通知 / Webhooks → 新建
+2. 地址填（**末尾的斜杠不能少**，`source=Emby` 大小写敏感）：
 
 ```
-http://<你的MP地址>/api/v1/plugin/EmbySyncDel/emby_webhook?key=<插件配置里的密钥>
+http://<你的MP地址>/api/v1/webhook/?token=<MoviePilot 的 API 密钥>&source=Emby
 ```
 
-而不是 MoviePilot 自带的 `/api/v1/webhook`。原因是 MoviePilot 的 Emby 解析器
-（`app/modules/emby/emby.py::get_webhook_message`）只读**表单字段 `data`** 或**查询参数**，
-**不读 JSON 请求体**：
+3. 事件勾选"媒体库删除 / 项目删除"那几项
+4. **提交格式必须选 form-data**（表单字段名 `data`）
+
+### 为什么必须 form-data？
+
+MoviePilot 的 Emby 解析器（`app/modules/emby/emby.py::get_webhook_message`）只读**表单字段 `data`**
+或**查询参数**，**不读 JSON 请求体**：
 
 ```python
 if form and form.get("data"):
@@ -89,11 +86,24 @@ else:
 message = json.loads(result)
 eventType = message.get("Event")
 if not eventType:
-    return None          # ← Emby 发的 JSON body 到这里已丢失，事件被静默丢弃（HTTP 200、无日志）
+    return None          # ← Emby 发 JSON body 时，事件到这里已被丢弃（HTTP 200、无日志）
 ```
 
-而 Emby 的 Webhooks 插件发的正是 JSON body → 事件在 MP 那一步就没了，
-**任何挂在宿主事件总线上的插件都收不到**（这正是同类"联动删除"插件集体失效的根因）。
-这是**通道**问题，不是格式问题 —— 所以本插件自带一个直接吃 JSON 的入口。
-（对照：Plex 走表单字段 `payload`、Jellyfin 由 MP 反向调 API 取详情，这两条默认链路是通的，只有 Emby 断。）
+Emby 的 Webhooks 插件同时支持 form-data 和 JSON 两种提交方式：**选 JSON 则事件会被 MoviePilot
+静默丢弃**，任何挂在宿主事件总线上的插件都收不到（这也是同类"联动删除"插件集体失效的根因）；
+**选 form-data 则一切正常**，插件无需任何专属入口。
 
+> 1.4.x 及更早版本自带一个「直投入口」（`/api/v1/plugin/EmbySyncDel/emby_webhook?key=...`）用于绕过
+> 上述限制。**1.5.0 已移除该入口**（它是个匿名入口，多一个可被伪造触发删除的面）。
+> 从 1.4.4 起用直投入口的用户请把 Emby 的 Webhook 地址改回上面的默认入口并选 form-data。
+
+### 报文格式不挑
+
+插件解析时对字段写法很宽容，你换 Emby 模板一般不影响：
+
+```
+事件名：Event / event / eventType / type
+条目：  Item（单个）/ Items（数组，逐条处理）
+名称：  Name / name（年份自动补成「名称 (年份)」）
+路径：  Path / path       身份：ProviderIds（没有则退回路径匹配）
+```

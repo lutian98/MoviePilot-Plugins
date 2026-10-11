@@ -28,7 +28,6 @@ import shutil
 import time
 import unicodedata
 import threading
-import uuid
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -84,7 +83,6 @@ MAX_HISTORY = 200
 # 插件历史页展示条数
 HISTORY_PAGE_SIZE = 20
 # 直投 webhook 自动生成的密钥长度
-WEBHOOK_KEY_LEN = 24
 # 删除空目录时最多向上回退的层数（防止沿父目录一路删到媒体库之外）
 MAX_PRUNE_DEPTH = 8
 # 同一删除事件在这么长时间内只处理一次（Emby 重投 / 代理重放 / 双入口同时到达）
@@ -383,9 +381,6 @@ class EmbySyncDel(_PluginBase):
             self._title_guard = bool(config.get("title_guard", True))
             self._del_history = bool(config.get("del_history"))
             # 直投 webhook 的密钥（Emby Webhooks 插件无法发送 MP 的 API Key，改用 URL 密钥自校验）
-            self._webhook_key = str(config.get("webhook_key") or "").strip()
-            if not self._webhook_key:
-                self._webhook_key = uuid.uuid4().hex[:WEBHOOK_KEY_LEN]
 
             # 清理插件历史（一次性开关）
             if self._del_history:
@@ -406,7 +401,6 @@ class EmbySyncDel(_PluginBase):
                 "torrent_action": self._torrent_action,
                 "title_guard": self._title_guard,
                 "del_history": False,
-                "webhook_key": self._webhook_key,
             })
 
         # 默认下载器（缺少下载器信息时用于处理下载任务）
@@ -430,35 +424,6 @@ class EmbySyncDel(_PluginBase):
         """本插件不提供远程命令。"""
         return []
 
-    def get_api(self) -> List[Dict[str, Any]]:
-        """注册插件 API：接收媒体服务器直投的删除事件、查询历史、清空历史。"""
-        return [
-            {
-                "path": "/emby_webhook",
-                "endpoint": self.api_emby_webhook,
-                "methods": ["POST"],
-                # 媒体服务器的 Webhooks 插件无法发送 MP 的 API Key，
-                # 因此放行宿主鉴权，由插件自己用 URL 里的 key 校验。
-                "allow_anonymous": True,
-                "auth": "apikey",
-                "summary": "接收媒体服务器（Emby）删除事件 —— 供 Emby Webhooks 插件直接投递",
-            },
-            {
-                "path": "/history",
-                "endpoint": self.api_history,
-                "methods": ["GET"],
-                "auth": "apikey",
-                "summary": "查询联动删除历史",
-            },
-            {
-                "path": "/delete_history",
-                "endpoint": self.api_delete_history,
-                "methods": ["GET"],
-                "auth": "apikey",
-                "summary": "清空联动删除历史",
-            },
-        ]
-
     def api_history(self) -> schemas.Response:
         """查询执行历史。"""
         return schemas.Response(success=True, data=self.get_data("history") or [])
@@ -469,115 +434,7 @@ class EmbySyncDel(_PluginBase):
         return schemas.Response(success=True, message="已清空")
 
     # ------------------------------------------------------------------ #
-    # 媒体服务器直投入口（Emby Webhooks 插件）—— 本插件能独立工作的关键
     # ------------------------------------------------------------------ #
-
-    def api_emby_webhook(self, payload: Optional[dict] = None, key: str = "") -> dict:
-        """接收媒体服务器直接投递的删除事件（原始 JSON）。
-
-        为什么需要它：MoviePilot 的 Emby 解析器只认表单字段 ``data`` / 查询参数，
-        **不读 JSON 请求体**（见 ``app/modules/emby/emby.py::get_webhook_message``），
-        而 Emby 的 Webhooks 插件发的正是 JSON body → 事件被 MP 静默丢弃（HTTP 200、无日志），
-        任何插件都收不到真实删除事件。本入口绕开那条解析链，直接吃原始 JSON：
-
-            Emby → 插件 → Webhooks → Webhook URL 填
-            ``http://<你的MP地址>/api/v1/plugin/EmbySyncDel/emby_webhook?key=<插件配置里的密钥>``
-
-        处理放后台线程执行并立即返回，避免拖住 Emby 的 webhook 请求。
-        """
-        expected_key = str(getattr(self, "_webhook_key", "") or "")
-        # 恒定时间比较：避免通过响应时间逐字节猜出密钥
-        if not expected_key or not hmac.compare_digest(str(key or ""), expected_key):
-            self._record_event("api_rejected", "直投 webhook 密钥校验失败", "")
-            return {"ok": False, "msg": "bad key"}
-        if not isinstance(payload, dict) or not payload:
-            self._record_event("api_rejected", "直投 webhook 报文体为空或非 JSON 对象", "")
-            return {"ok": False, "msg": "bad body"}
-        if not self._payload_event_name(payload):
-            self._record_event("api_rejected", "直投 webhook 报文缺少 Event 字段", "")
-            return {"ok": False, "msg": "no event"}
-        items = self._payload_items(payload) or [{}]
-        event_datas = [self._event_data_from_payload(payload, item=it) for it in items]
-        event_data = event_datas[0]
-        # 标记来源，便于在历史里区分「媒体服务器直投」与「宿主事件」
-        self._record_event(
-            "api_received",
-            f"收到媒体服务器直投事件：{event_data.event}",
-            getattr(event_data, "item_name", ""),
-            getattr(event_data, "media_id", "") or "",
-        )
-
-        def _run() -> None:
-            for data in event_datas:
-                try:
-                    self._handle_event_data(data)
-                except Exception as err:  # noqa: BLE001
-                    logger.error(f"联动删除：直投 webhook 处理异常：{err}")
-                    self._record_event(
-                        "error", f"直投 webhook 处理异常：{type(err).__name__}: {err}"
-                    )
-
-        threading.Thread(target=_run, daemon=True).start()
-        return {"ok": True, "msg": "accepted", "event": getattr(event_data, "event", "")}
-
-    @staticmethod
-    def _payload_event_name(payload: Dict[str, Any]) -> str:
-        """事件名：兼容各家模板的写法（Event / event / eventType / type）。"""
-        for key in ("Event", "event", "eventType", "type"):
-            value = payload.get(key)
-            if value:
-                return str(value)
-        return ""
-
-    @staticmethod
-    def _payload_items(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """报文里的条目：既支持单个 Item，也支持一次报多个的 Items 列表。
-
-        为什么必须支持列表：Emby 删掉一个目录（例如一季剧集）时，
-        部分模板会把受影响的条目放在 ``Items`` 数组里一次发出；只认 ``Item``
-        会把这类事件整条丢掉（日志里表现为「报文缺少 Event」或「缺少媒体路径」）。
-        """
-        for key in ("Item", "item"):
-            item = payload.get(key)
-            if isinstance(item, dict) and item:
-                return [item]
-        for key in ("Items", "items"):
-            items = payload.get(key)
-            if isinstance(items, list):
-                return [x for x in items if isinstance(x, dict)]
-        return []
-
-    def _event_data_from_payload(self, payload: Dict[str, Any], item: Optional[Dict[str, Any]] = None) -> Any:
-        """把媒体服务器原始报文整理成宿主事件对象（与 MP 解析器同形），复用同一条处理链。"""
-        if item is None:
-            item = self._payload_items(payload)
-            item = item[0] if item else {}
-        if not isinstance(item, dict):
-            item = {}
-        name = str(item.get("Name") or item.get("name") or "").strip()
-        year = item.get("ProductionYear") or ""
-        if name and year and str(year) not in name:
-            name = f"{name} ({year})"
-        media_source: Optional[MediaSource] = None
-        media_id: Optional[str] = None
-        provider_ids = item.get("ProviderIds") or {}
-        if isinstance(provider_ids, dict) and provider_ids:
-            try:
-                media_source, media_id = MediaServerIdentityHelper.from_provider_ids(provider_ids)
-            except Exception as err:  # noqa: BLE001
-                logger.warning(f"联动删除：报文 ProviderIds 解析失败：{err}")
-        item_type = str(item.get("Type") or item.get("type") or "")
-        return SimpleNamespace(
-            event=self._payload_event_name(payload),
-            item_type=item_type,
-            media_type=item_type,
-            item_name=name,
-            item_path=str(item.get("Path") or item.get("path") or ""),
-            media_source=media_source,
-            media_id=str(media_id) if media_id else None,
-            # 原始报文：身份兜底（ProviderIds）等逻辑从这里取
-            json_object=payload,
-        )
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         """拼装插件配置页面：1、页面配置；2、数据结构。"""
@@ -795,36 +652,16 @@ class EmbySyncDel(_PluginBase):
                         ],
                     },
                     {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "webhook_key",
-                                            "label": "直投 Webhook 密钥",
-                                            "hint": "媒体服务器直投入口的校验密钥，首次启用自动生成，可自行更换。",
-                                            "persistent-hint": True,
-                                        },
-                                    }
-                                ],
-                            },
-                        ],
-                    },
-                    {
                         "component": "VAlert",
                         "props": {
                             "type": "success",
                             "variant": "tonal",
                             "density": "compact",
                             "class": "mt-2",
-                            "text": "直投入口（推荐）：媒体服务器 Webhooks 插件的地址填 "
-                                    "http://你的MP地址/api/v1/plugin/EmbySyncDel/emby_webhook?key=上面的密钥 —— "
-                                    "MoviePilot 自带的 Emby 解析器不读 JSON 请求体，Emby 的删除事件会被它静默丢弃，"
-                                    "走这个直投入口才收得到。",
+                            "text": "配置 Emby：Emby 控制台 → 通知/Webhooks 新建一个 Webhook，地址填 "
+                                    "http://你的MP地址/api/v1/webhook/?token=<MoviePilot 的 API 密钥>&source=Emby ，"
+                                    "提交方式必须选 form-data（表单字段名 data）。MoviePilot 的 Emby 解析器只读表单字段 "
+                                    "data、不读 JSON 请求体 —— 选 JSON 的话事件会被静默丢弃，插件收不到删除通知。",
                         },
                     },
                     {
@@ -863,7 +700,6 @@ class EmbySyncDel(_PluginBase):
             "seed_tags": DEFAULT_SEED_TAGS,
             "title_guard": True,
             "torrent_action": ACTION_DELETE,
-            "webhook_key": "",
         }
 
     # ------------------------------------------------------------------ #

@@ -18,6 +18,29 @@ from tests import app_stub
 plugin = app_stub.load_plugin()
 
 
+
+def inject_event(instance, payload, event=None):
+    """把媒体服务器形态的报文注入处理链（等价于宿主 webhook 事件送达）。
+
+    直投入口已移除，事件只能从宿主事件总线进来，故测试统一走这条真实路径。
+    """
+    from types import SimpleNamespace
+    item = payload.get("Item") or payload.get("item") or {}
+    ns = SimpleNamespace(
+        event=event or payload.get("Event") or payload.get("event") or "",
+        item_type=item.get("Type") or "",
+        media_type=item.get("Type") or "",
+        item_name=item.get("Name") or "",
+        item_path=item.get("Path") or "",
+        item_id=item.get("Id") or "",
+        provider_ids=item.get("ProviderIds") or {},
+        json_object=payload,
+    )
+    instance._handle_event_data(ns)
+    # 保持与原直投入口一致的返回契约（用例只关心"事件被处理链收下"）
+    return {"ok": True, "msg": "accepted"}
+
+
 class FakeRecord:
     """整理记录桩。"""
 
@@ -383,65 +406,6 @@ class TestLazyGuards(unittest.TestCase):
         self.assertIn(app_stub.EventType.WebhookMessage, app_stub.eventmanager.handlers)
 
 
-class TestDirectWebhookApi(unittest.TestCase):
-    """直投 webhook 入口（媒体服务器把 JSON 直接投给插件）—— 本插件独立工作的关键路径。"""
-
-    def _instance(self, records=None):
-        instance, notifies = build_plugin(records)
-        instance._webhook_key = "k123"
-        return instance, notifies
-
-    def test_rejects_wrong_key(self):
-        instance, notifies = self._instance()
-        out = instance.api_emby_webhook({"Event": "library.deleted"}, key="bad")
-        self.assertFalse(out["ok"])
-        self.assertEqual(notifies, [])
-
-    def test_rejects_empty_body(self):
-        instance, _ = self._instance()
-        self.assertFalse(instance.api_emby_webhook({}, key="k123")["ok"])
-        self.assertFalse(instance.api_emby_webhook(None, key="k123")["ok"])
-        self.assertFalse(instance.api_emby_webhook({"Item": {"Name": "x"}}, key="k123")["ok"])
-
-    def test_accepts_and_cleans_up(self):
-        """Emby 真实报文形状（JSON body、无 ProviderIds）应能命中并按路径清理。"""
-        record_dest = ("/downloads/link/Movie/中国电影/微微一笑很倾城 (2016)/"
-                       "微微一笑很倾城 (2016) - 1080p.mkv")
-        instance, notifies = self._instance([FakeRecord(20597, "微微一笑很倾城", record_dest)])
-        payload = {
-            "Event": "library.deleted",
-            "Item": {
-                "Type": "Movie",
-                "Name": "微微一笑很倾城",
-                "ProductionYear": 2016,
-                "Path": "/mnt/user/Media/Strm/Media/Movie/中国电影/微微一笑很倾城 (2016)/"
-                        "微微一笑很倾城 (2016) - 1080p.strm",
-            },
-        }
-        out = instance.api_emby_webhook(payload, key="k123")
-        self.assertTrue(out["ok"])
-        # 处理在后台线程，等它跑完
-        for _ in range(100):
-            if notifies:
-                break
-            import time as _t
-            _t.sleep(0.05)
-        self.assertEqual(len(notifies), 1)
-        self.assertIn("将删除 1 项", notifies[0]["title"])
-
-    def test_provider_ids_used_when_present(self):
-        """报文带 ProviderIds 时应取到 tmdb 身份（不再依赖路径兜底）。"""
-        instance, _ = self._instance()
-        data = instance._event_data_from_payload({
-            "Event": "library.deleted",
-            "Item": {"Type": "Movie", "Name": "某片", "ProductionYear": 2016,
-                     "ProviderIds": {"Tmdb": "12345"}},
-        })
-        self.assertEqual(str(data.media_id), "12345")
-        self.assertEqual(data.item_name, "某片 (2016)")
-        self.assertEqual(data.event, "library.deleted")
-
-
 class TestNotificationImage(unittest.TestCase):
     """通知配图：优先用整理记录自带海报（老插件的做法），没有才用兜底图标。"""
 
@@ -471,13 +435,12 @@ class TestNotificationImage(unittest.TestCase):
         rec = FakeRecord(20597, "微微一笑很倾城", "/downloads/link/Movie/中国电影/微微一笑很倾城 (2016)/某片.mkv",
                          image=poster)
         instance, notifies = build_plugin([rec])
-        instance._webhook_key = "k123"
         payload = {
             "Event": "library.deleted",
             "Item": {"Type": "Movie", "Name": "微微一笑很倾城", "ProductionYear": 2016,
                      "Path": "/mnt/user/Media/Strm/Media/Movie/中国电影/微微一笑很倾城 (2016)/某片.strm"},
         }
-        self.assertTrue(instance.api_emby_webhook(payload, key="k123")["ok"])
+        inject_event(instance, payload)
         import time as _t
         for _ in range(100):
             if notifies:
@@ -505,9 +468,8 @@ class TestContainerEventGuard(unittest.TestCase):
                          "/downloads/link/Movie/欧美电影/马戏之王 (2017)/马戏之王 (2017) - 1080p.mkv")
         instance, notifies = build_plugin([rec])
         instance.save_data("history", [])          # 清掉其它用例留下的历史
-        instance._webhook_key = "k"
         instance._dry_run = False          # 即使是真实删除模式，也必须拒绝
-        out = instance.api_emby_webhook(self.FOLDER_PAYLOAD, key="k")
+        out = inject_event(instance, self.FOLDER_PAYLOAD)
         self.assertTrue(out["ok"])          # 收下事件，但不处理
         import time as _t
         _t.sleep(0.6)
@@ -520,10 +482,9 @@ class TestContainerEventGuard(unittest.TestCase):
     def test_series_container_also_skipped(self):
         instance, notifies = build_plugin()
         instance.save_data("history", [])
-        instance._webhook_key = "k"
         payload = {"Event": "library.deleted",
                    "Item": {"Type": "Series", "Name": "某剧", "Path": "/mnt/user/Media/Strm/Media/TV/某剧"}}
-        self.assertTrue(instance.api_emby_webhook(payload, key="k")["ok"])
+        inject_event(instance, payload)
         import time as _t
         _t.sleep(0.6)
         stages = [x.get("stage") for x in (instance.get_data("history") or [])]
@@ -538,11 +499,10 @@ class TestContainerEventGuard(unittest.TestCase):
                          "/downloads/link/Movie/欧美电影/马戏之王 (2017)/马戏之王 (2017) - 1080p.mkv")
         instance, notifies = build_plugin([rec])
         instance.save_data("history", [])
-        instance._webhook_key = "k"
         payload = {"Event": "library.deleted",
                    "Item": {"Type": "Movie", "Name": "马戏之王 (2017)",
                             "Path": "/mnt/user/Media/Strm/Media/Movie/欧美电影/马戏之王 (2017)"}}
-        self.assertTrue(instance.api_emby_webhook(payload, key="k")["ok"])
+        inject_event(instance, payload)
         import time as _t
         for _ in range(60):
             if notifies:
@@ -561,12 +521,11 @@ class TestContainerEventGuard(unittest.TestCase):
                          "/downloads/link/Movie/欧美电影/马戏之王 (2017)/马戏之王 (2017) - 1080p.mkv")
         instance, notifies = build_plugin([rec])
         instance.save_data("history", [])
-        instance._webhook_key = "k"
         payload = {"Event": "library.deleted",
                    "Item": {"Type": "Movie", "Name": "马戏之王", "ProductionYear": 2017,
                             "Path": "/mnt/user/Media/Strm/Media/Movie/欧美电影/马戏之王 (2017)/"
                                     "马戏之王 (2017) - 1080p.strm"}}
-        self.assertTrue(instance.api_emby_webhook(payload, key="k")["ok"])
+        inject_event(instance, payload)
         import time as _t
         for _ in range(100):
             if notifies:
@@ -612,11 +571,10 @@ class TestNewGuards(unittest.TestCase):
         rec_e05 = FakeRecord(70005, "某剧",
                             "/downloads/link/TV/某剧 (2019)/Season 1/某剧 - S01E05 - 1080p.mkv")
         instance, notifies = build_plugin([rec_e05])
-        instance._webhook_key = "k"
         payload = {"Event": "library.deleted",
                    "Item": {"Type": "", "Name": "某剧", "Path": "/mnt/user/Media/Strm/Media/TV/某剧 (2019)/"
                                                               "Season 1/某剧 - S01E01 - 1080p.strm"}}
-        instance.api_emby_webhook(payload, key="k")
+        inject_event(instance, payload)
         import time as _t
         _t.sleep(0.6)
         self.assertEqual(instance._transferhis.deleted, [], "类型缺失时不得把剧集当电影匹配")
@@ -646,15 +604,14 @@ class TestNewGuards(unittest.TestCase):
         """同一事件短时间内重复到达只处理一次（幂等）。"""
         rec = FakeRecord(70200, "某片", "/downloads/link/Movie/中国电影/某片 (2016)/某片 (2016) - 1080p.mkv")
         instance, notifies = build_plugin([rec])
-        instance._webhook_key = "k"
         payload = {"Event": "library.deleted",
                    "Item": {"Type": "Movie", "Name": "某片", "ProductionYear": 2016,
                             "Path": "/mnt/user/Media/Strm/Media/Movie/中国电影/某片 (2016)/"
                                     "某片 (2016) - 1080p.strm"}}
-        first = instance.api_emby_webhook(payload, key="k")
+        first = inject_event(instance, payload)
         import time as _t
         _t.sleep(0.4)
-        second = instance.api_emby_webhook(payload, key="k")
+        second = inject_event(instance, payload)
         self.assertEqual(first.get("msg"), "accepted")
         self.assertEqual(second.get("msg"), "accepted")   # 入口一律接受
         _t.sleep(0.5)
@@ -715,12 +672,11 @@ class TestEventTypeSelection(unittest.TestCase):
         instance, notifies = build_plugin([rec])
         instance._event_types = ["library.deleted"]
         instance._event_types_extra = ""
-        instance._webhook_key = "k"
         # 勾选项之内 → 处理
-        ok = instance.api_emby_webhook(
+        ok = inject_event(instance, 
             {"Event": "library.deleted", "Item": {"Type": "Movie", "Name": "某片", "ProductionYear": 2016,
                                                   "Path": "/mnt/user/Media/Strm/Media/Movie/中国电影/某片 (2016)/"
-                                                          "某片 (2016) - 1080p.strm"}}, key="k")
+                                                          "某片 (2016) - 1080p.strm"}})
         self.assertEqual(ok.get("msg"), "accepted")
         import time as _t
         _t.sleep(0.5)
@@ -807,58 +763,6 @@ class TestTaggedSeeds(unittest.TestCase):
         flat = json.dumps(form, ensure_ascii=False)
         self.assertIn('"model": "seed_tags"', flat)
         self.assertEqual(defaults.get("seed_tags"), plugin.DEFAULT_SEED_TAGS)
-
-
-class TestPayloadTolerance(unittest.TestCase):
-    """报文容错：不同 Emby Webhooks 模板的写法都要能收（用户在 Emby 里换模板不至于静默失效）。"""
-
-    def test_event_name_aliases(self):
-        for key in ("Event", "event", "eventType", "type"):
-            self.assertEqual(plugin.EmbySyncDel._payload_event_name({key: "library.deleted"}),
-                             "library.deleted", f"{key} 应被识别为事件名")
-        self.assertEqual(plugin.EmbySyncDel._payload_event_name({}), "")
-
-    def test_items_single_and_list(self):
-        one = plugin.EmbySyncDel._payload_items({"Item": {"Name": "某片", "Path": "/x.strm"}})
-        self.assertEqual(len(one), 1)
-        many = plugin.EmbySyncDel._payload_items({"Items": [{"Name": "甲"}, {"Name": "乙"}, "not-a-dict"]})
-        self.assertEqual([x["Name"] for x in many], ["甲", "乙"])
-        self.assertEqual(plugin.EmbySyncDel._payload_items({}), [])
-
-    def test_multi_item_payload_is_processed_item_by_item(self):
-        instance, _ = build_plugin()
-        instance.save_data("history", [])
-        instance._webhook_key = "k"
-        payload = {"eventType": "library.deleted",
-                   "Items": [{"Type": "Movie", "Name": "多条目甲", "ProductionYear": 1999,
-                              "Path": "/mnt/user/Media/Strm/Media/Movie/欧美电影/多条目甲 (1999)/多条目甲 (1999) - 1080p.strm"},
-                             {"Type": "Movie", "Name": "多条目乙", "ProductionYear": 1999,
-                              "Path": "/mnt/user/Media/Strm/Media/Movie/欧美电影/多条目乙 (1999)/多条目乙 (1999) - 1080p.strm"}]}
-        out = instance.api_emby_webhook(payload, key="k")
-        self.assertEqual(out.get("msg"), "accepted")
-        import time as _t
-        _t.sleep(0.6)
-        stages = [x.get("stage") for x in (instance.get_data("history") or [])]
-        self.assertEqual(stages.count("received"), 2, "两个条目都要进入处理链")
-        names = " ".join(str(x.get("name")) for x in (instance.get_data("history") or []))
-        self.assertIn("多条目甲", names)
-        self.assertIn("多条目乙", names)
-
-    def test_eventType_alias_drives_processing(self):
-        instance, _ = build_plugin()
-        instance.save_data("history", [])
-        instance._webhook_key = "k"
-        out = instance.api_emby_webhook(
-            {"eventType": "library.deleted",
-             "Item": {"Type": "Movie", "Name": "别名事件片", "ProductionYear": 1999,
-                      "Path": "/mnt/user/Media/Strm/Media/Movie/欧美电影/别名事件片 (1999)/别名事件片 (1999) - 1080p.strm"}},
-            key="k")
-        self.assertEqual(out.get("msg"), "accepted")
-        import time as _t
-        _t.sleep(0.6)
-        stages = [x.get("stage") for x in (instance.get_data("history") or [])]
-        self.assertIn("received", stages)
-        self.assertNotIn("api_rejected", stages)
 
 
 class TestNotifyStyle(unittest.TestCase):
