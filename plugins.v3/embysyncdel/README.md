@@ -58,3 +58,42 @@ python -m unittest discover -s tests/v3 -t .
 ## 许可证
 
 GPL-3.0
+
+## 关于「必须配直投入口」——不是挑格式，是挑通道
+
+很多同学看到文档里给了报文示例，就以为插件对格式有要求。**其实没有**：下面这些写法都能解析，
+你换 Emby Webhooks 的模板一般不影响（1.4.4 起还额外支持 `Items` 数组与 `eventType`/`type` 事件名别名）：
+
+```
+事件名：Event / event / eventType / type
+条目：  Item（单个）/ Items（数组，逐条处理）
+名称：  Name / name（年份会自动补成「名称 (年份)」）
+路径：  Path / path       身份：ProviderIds（没有则退回路径匹配）
+```
+
+**真正的硬性要求只有一条：事件要发到插件的直投入口**
+
+```
+http://<你的MP地址>/api/v1/plugin/EmbySyncDel/emby_webhook?key=<插件配置里的密钥>
+```
+
+而不是 MoviePilot 自带的 `/api/v1/webhook`。原因是 MoviePilot 的 Emby 解析器
+（`app/modules/emby/emby.py::get_webhook_message`）只读**表单字段 `data`** 或**查询参数**，
+**不读 JSON 请求体**：
+
+```python
+if form and form.get("data"):
+    result = form.get("data")
+else:
+    result = json.dumps(dict(args))
+message = json.loads(result)
+eventType = message.get("Event")
+if not eventType:
+    return None          # ← Emby 发的 JSON body 到这里已丢失，事件被静默丢弃（HTTP 200、无日志）
+```
+
+而 Emby 的 Webhooks 插件发的正是 JSON body → 事件在 MP 那一步就没了，
+**任何挂在宿主事件总线上的插件都收不到**（这正是同类"联动删除"插件集体失效的根因）。
+这是**通道**问题，不是格式问题 —— 所以本插件自带一个直接吃 JSON 的入口。
+（对照：Plex 走表单字段 `payload`、Jellyfin 由 MP 反向调 API 取详情，这两条默认链路是通的，只有 Emby 断。）
+
