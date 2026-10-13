@@ -325,7 +325,7 @@ class EmbySyncDel(_PluginBase):
     # 插件图标（放在仓库 icons/ 目录，填文件名即可）
     plugin_icon = "embysyncdel.png"
     # 插件版本
-    plugin_version = "1.5.5"
+    plugin_version = "1.5.6"
     # 插件作者
     plugin_author = "lutian98"
     # 作者主页
@@ -583,6 +583,30 @@ class EmbySyncDel(_PluginBase):
                                             "rows": 2,
                                             "label": "排除路径（不处理）",
                                             "placeholder": "一行一个；媒体服务器路径包含该字符串即跳过（子串匹配，不是前缀）",
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VTextarea",
+                                        "props": {
+                                            "model": "source_roots",
+                                            "rows": 2,
+                                            "label": "源文件根目录（可选，建议配置）",
+                                            "placeholder": "/downloads/PT/保种（一行一个）",
+                                            "hint": "配置后：整理记录里的源文件必须落在这些根目录内才允许删除；"
+                                                    "同时它是「附属文件」（字幕/外挂音轨/元数据/图片）在源目录已无媒体文件时"
+                                                    "仍可一并清理的前提条件。",
+                                            "persistent-hint": True,
                                         },
                                     }
                                 ],

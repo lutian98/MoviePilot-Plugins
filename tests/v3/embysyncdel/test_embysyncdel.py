@@ -875,6 +875,13 @@ class TestAuxSourceFiles(unittest.TestCase):
             exe.write_bytes(b"x")
             self.assertFalse(self._inst()._is_aux_file(str(exe)), "白名单外的扩展名不得删")
 
+    def test_form_declares_source_roots(self):
+        """source_roots 必须在配置表单里出现 —— 否则 MP 存不下该配置（1.5.5 的教训）。"""
+        import inspect
+        src = inspect.getsource(plugin.EmbySyncDel.get_form)
+        self.assertIn('"model": "source_roots"', src, "source_roots 未出现在配置表单中")
+        self.assertIn('"model": "library_path"', src)
+
     def test_aux_ext_whitelist_only(self):
         """is_aux_ext 只看扩展名。"""
         self.assertTrue(plugin.is_aux_ext("/x/movie.chs.ass"))
