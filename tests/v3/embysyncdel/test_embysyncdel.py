@@ -837,6 +837,51 @@ class TestHostEventRegistration(unittest.TestCase):
         self.assertIn("received", stages, "注册入口收到事件后应进入处理链")
         self.assertNotIn("get_api", [getattr(h, "__name__", "") for h in handlers])
 
+class TestAuxSourceFiles(unittest.TestCase):
+    """附属文件（字幕/音轨/元数据）清理：必须同时满足「扩展名在白名单」+「同目录存在媒体文件」。
+
+    背景（2026-10-13 用户口径 B）：源目录里除片子本体还有字幕等附属文件，不删就会残留成
+    "外部清理未完成"，整理记录也因此删不掉。但只看扩展名会误删通用目录里的同名文件，
+    故加第二条校验，任一不满足即 fail-closed 不删。
+    """
+
+    def _inst(self):
+        inst, _ = build_plugin()
+        return inst
+
+    def test_aux_with_sibling_media_is_deletable(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "movie.mkv").write_bytes(b"x")
+            aux = Path(d) / "movie.chs.ass"
+            aux.write_text("s")
+            self.assertTrue(self._inst()._is_aux_file(str(aux)), "同目录有媒体文件时附属文件应可删")
+
+    def test_aux_without_any_media_is_not_deletable(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d:
+            aux = Path(d) / "notes.srt"
+            aux.write_text("s")
+            self.assertFalse(self._inst()._is_aux_file(str(aux)), "同目录没有媒体文件时不得删")
+
+    def test_unknown_extension_is_not_aux(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "movie.mkv").write_bytes(b"x")
+            exe = Path(d) / "setup.exe"
+            exe.write_bytes(b"x")
+            self.assertFalse(self._inst()._is_aux_file(str(exe)), "白名单外的扩展名不得删")
+
+    def test_media_file_itself_is_not_treated_as_aux(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "movie.mkv").write_bytes(b"x")
+            self.assertFalse(self._inst()._is_aux_file(str(Path(d) / "movie.mkv")))
+
 
 if __name__ == "__main__":
     unittest.main()

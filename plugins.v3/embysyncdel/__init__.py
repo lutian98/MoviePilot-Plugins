@@ -293,6 +293,17 @@ def is_media_file(path: Optional[str]) -> bool:
     return suffix in {str(ext).lower().lstrip(".") for ext in settings.RMT_MEDIAEXT}
 
 
+# 附属文件扩展名白名单：字幕 / 外挂音轨 / 元数据与图片。
+# 这类文件与片子同生共死，源目录清理时必须一并删掉，否则会残留成
+# 「外部清理未完成」，整理记录也删不掉（2026-10-13 用户口径：一并清）。
+AUX_EXTS = {
+    "ass", "ssa", "srt", "sup", "sub", "idx", "vtt", "smi", "sami", "ttml",
+    "mka", "flac", "aac", "ac3", "dts", "m4a", "ape", "wav",
+    "nfo", "txt", "url", "sfv", "md5", "sha1", "cue", "log", "tmm",
+    "jpg", "jpeg", "png", "webp", "bmp", "gif",
+}
+
+
 # --------------------------------------------------------------------------- #
 # 插件
 # --------------------------------------------------------------------------- #
@@ -307,7 +318,7 @@ class EmbySyncDel(_PluginBase):
     # 插件图标（放在仓库 icons/ 目录，填文件名即可）
     plugin_icon = "embysyncdel.png"
     # 插件版本
-    plugin_version = "1.5.3"
+    plugin_version = "1.5.4"
     # 插件作者
     plugin_author = "lutian98"
     # 作者主页
@@ -1012,9 +1023,15 @@ class EmbySyncDel(_PluginBase):
                         f"请检查「媒体库路径映射」配置"
                     )
             if record.src:
-                if not is_media_file(record.src) and not os.path.isdir(str(record.src)):
+                _src_is_dir = os.path.isdir(str(record.src))
+                _src_is_media = is_media_file(record.src)
+                _src_is_aux = (not _src_is_media and not _src_is_dir
+                               and self._is_aux_file(record.src))
+                if not (_src_is_media or _src_is_dir or _src_is_aux):
                     cleanup_ok = False
-                    lines.append(f"• 跳过源文件（既不是媒体文件也不是目录）：{record.src}")
+                    lines.append(
+                        f"• 跳过源文件（既不是媒体文件、目录，也不是与媒体同目录的附属文件）：{record.src}"
+                    )
                 elif not self._source_allowed(record.src):
                     cleanup_ok = False
                     lines.append(f"• 跳过源文件（不在允许的源文件根目录内）：{record.src}")
@@ -1025,8 +1042,9 @@ class EmbySyncDel(_PluginBase):
                     # 剪枝根 = 源文件所在目录的**上一级**：片子自己的源目录可以被清掉，
                     # 但绝不越过它继续往上删（保种根下还有别的片子）。
                     _src_dir = os.path.dirname(str(record.src))
-                    msg, ok = self._remove_file(record.src, "源文件",
-                                                [os.path.dirname(_src_dir) or _src_dir])
+                    msg, ok = self._remove_file(
+                        record.src, "附属文件" if _src_is_aux else "源文件",
+                        [os.path.dirname(_src_dir) or _src_dir])
                     lines.extend(msg)
                     cleanup_ok = cleanup_ok and ok
         # 2、下载任务（含转种与辅种）
@@ -1071,6 +1089,27 @@ class EmbySyncDel(_PluginBase):
             if current.parent == current:
                 return False
             current = current.parent
+        return False
+
+    def _is_aux_file(self, path: str) -> bool:
+        """是否为"可以一并删掉的附属文件"（字幕/外挂音轨/元数据/图片）。
+
+        **双条件**，缺一不可：
+          ① 扩展名在 ``AUX_EXTS`` 白名单内；
+          ② 该文件所在目录里**确实存在媒体文件**（说明它是某个片源的附属文件，
+             而不是通用目录里的同名杂物）。
+        任一条件不满足即返回 False（fail-closed），宁可不删也不误删。
+        """
+        p = Path(str(path).replace("\\", "/"))
+        if p.suffix.lower().lstrip(".") not in AUX_EXTS:
+            return False
+        try:
+            for child in p.parent.iterdir():
+                if child.is_file() and is_media_file(str(child)):
+                    return True
+        except Exception as err:  # noqa: BLE001
+            logger.error(f"联动删除：判定附属文件失败（按不删处理）：{err}")
+            return False
         return False
 
     def _remove_file(
