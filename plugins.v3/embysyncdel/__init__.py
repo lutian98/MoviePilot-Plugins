@@ -293,6 +293,13 @@ def is_media_file(path: Optional[str]) -> bool:
     return suffix in {str(ext).lower().lstrip(".") for ext in settings.RMT_MEDIAEXT}
 
 
+def is_aux_ext(path: Optional[str]) -> bool:
+    """扩展名是否属于附属文件白名单（**仅看扩展名**，是否可删由调用方再定条件）。"""
+    if not path:
+        return False
+    return Path(str(path)).suffix.lower().lstrip(".") in AUX_EXTS
+
+
 # 附属文件扩展名白名单：字幕 / 外挂音轨 / 元数据与图片。
 # 这类文件与片子同生共死，源目录清理时必须一并删掉，否则会残留成
 # 「外部清理未完成」，整理记录也删不掉（2026-10-13 用户口径：一并清）。
@@ -318,7 +325,7 @@ class EmbySyncDel(_PluginBase):
     # 插件图标（放在仓库 icons/ 目录，填文件名即可）
     plugin_icon = "embysyncdel.png"
     # 插件版本
-    plugin_version = "1.5.4"
+    plugin_version = "1.5.5"
     # 插件作者
     plugin_author = "lutian98"
     # 作者主页
@@ -1025,8 +1032,14 @@ class EmbySyncDel(_PluginBase):
             if record.src:
                 _src_is_dir = os.path.isdir(str(record.src))
                 _src_is_media = is_media_file(record.src)
+                # 附属文件可删的两个充分条件（任一成立即可，均需扩展名在白名单内）：
+                #   ① 同目录里确实还有媒体文件（说明这是片源目录，附属文件与片子同生共死）；
+                #   ② 该路径落在「源文件根目录」(source_roots) 配置内 —— 该配置为空时不成立，
+                #      因此**必须显式配置**才放行，避免退化成"只看扩展名"。
                 _src_is_aux = (not _src_is_media and not _src_is_dir
-                               and self._is_aux_file(record.src))
+                               and is_aux_ext(record.src)
+                               and (self._is_aux_file(record.src)
+                                    or self._source_allowed(record.src)))
                 if not (_src_is_media or _src_is_dir or _src_is_aux):
                     cleanup_ok = False
                     lines.append(
@@ -1544,19 +1557,6 @@ class EmbySyncDel(_PluginBase):
                 return True
             cache[key] = now
         return False
-
-    def _source_allowed(self, path: str) -> bool:
-        """源文件是否允许删除。
-
-        配置了「源文件根目录」(source_roots) 时**必须**落在其中一个根目录内；
-        未配置时保持兼容（放行）—— 源文件路径来自 MoviePilot 自己的整理记录，属可信来源，
-        需要更严格约束时再填这个配置。
-        """
-        roots = [line.strip() for line in str(getattr(self, "_source_roots", "") or "").splitlines()
-                 if line.strip() and not line.strip().startswith("#")]
-        if not roots:
-            return True
-        return is_within(path, roots)
 
     def _allowed_roots(self) -> List[str]:
         """允许删除的根目录：**只包含媒体库映射**的 MoviePilot 侧目标。

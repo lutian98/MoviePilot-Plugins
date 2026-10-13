@@ -875,6 +875,22 @@ class TestAuxSourceFiles(unittest.TestCase):
             exe.write_bytes(b"x")
             self.assertFalse(self._inst()._is_aux_file(str(exe)), "白名单外的扩展名不得删")
 
+    def test_aux_ext_whitelist_only(self):
+        """is_aux_ext 只看扩展名。"""
+        self.assertTrue(plugin.is_aux_ext("/x/movie.chs.ass"))
+        self.assertTrue(plugin.is_aux_ext("/x/movie.nfo"))
+        self.assertFalse(plugin.is_aux_ext("/x/movie.mkv"))
+        self.assertFalse(plugin.is_aux_ext("/x/setup.exe"))
+        self.assertFalse(plugin.is_aux_ext(""))
+
+    def test_aux_allowed_inside_configured_source_roots(self):
+        """无同目录媒体文件时，落在 source_roots 内的附属文件仍可删；范围外不可。"""
+        inst = self._inst()
+        inst._source_roots = "/downloads/PT"
+        self.assertTrue(inst._source_allowed("/downloads/PT/保种/F/x.chs.srt"))
+        self.assertFalse(inst._source_allowed("/mnt/user/Media/别处/x.chs.srt"))
+        self.assertTrue(plugin.is_aux_ext("/downloads/PT/保种/F/x.chs.srt"))
+
     def test_media_file_itself_is_not_treated_as_aux(self):
         import tempfile
         from pathlib import Path
