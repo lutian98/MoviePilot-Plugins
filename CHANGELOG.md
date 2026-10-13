@@ -1,3 +1,15 @@
+## 1.5.3
+
+- **修复致命缺陷：宿主事件被静默吞掉**。1.5.1 补 `get_api` 时把
+  `@eventmanager.register(EventType.WebhookMessage)` 插在了装饰器与函数之间，
+  装饰器实际挂到了 `get_api` 上 → 宿主每个删除事件都调用 `get_api(event)`（返回 `[]`）
+  → 事件被丢弃（宿主返回 200、插件历史为空、不报错）。现象：Emby 条目删掉了，
+  但 MP 侧整理记录/源文件全都没清 → 上周批量清理"成功 0"。
+  现装饰器归位到 `sync_del_by_webhook`。
+- **新增两条护栏用例**：① 断言 `WebhookMessage` 注册的handler名必须是 `sync_del_by_webhook`
+  且不得是 `get_api`；② 从**注册入口**（而非直接调 `_handle_event_data`）走一遍事件处理，
+  断言进入处理链。此前用例都直接调内部方法，所以这类"入口没接上"的缺陷全测不出来。
+
 ## 1.5.2
 
 - **修复 1.5.1 的连带删除**：`get_api` 恢复时只留空实现，把插件自身的 `/history`（查询历史）

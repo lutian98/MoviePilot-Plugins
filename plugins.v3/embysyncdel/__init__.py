@@ -706,7 +706,6 @@ class EmbySyncDel(_PluginBase):
     # 事件入口
     # ------------------------------------------------------------------ #
 
-    @eventmanager.register(EventType.WebhookMessage)
     def get_api(self) -> List[Dict[str, Any]]:
         """注册插件自身的只读接口。
 
@@ -732,6 +731,7 @@ class EmbySyncDel(_PluginBase):
             },
         ]
 
+    @eventmanager.register(EventType.WebhookMessage)
     def sync_del_by_webhook(self, event: Event) -> None:
         """媒体服务器删除事件 → 同步清理（外层兜底：异常也留痕）。"""
         try:

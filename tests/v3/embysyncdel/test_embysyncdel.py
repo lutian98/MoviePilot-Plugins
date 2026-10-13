@@ -802,6 +802,41 @@ class TestNotifyStyle(unittest.TestCase):
         leftover = getattr(plugin.EmbySyncDel, "__abstractmethods__", frozenset())
         self.assertEqual(set(leftover), set(), f"仍有未实现的宿主抽象方法：{leftover}")
 
+class TestHostEventRegistration(unittest.TestCase):
+    """宿主事件注册必须挂在 sync_del_by_webhook 上。
+
+    1.5.1 补 get_api 时把 @eventmanager.register(EventType.WebhookMessage) 插到了
+    get_api 头上，导致每个删除事件都调用 get_api(event) → 返回 [] → 事件被静默吞掉
+    （宿主 200、插件历史为空、不报错），而单元测试因为直接调 _handle_event_data 全部通过。
+    """
+
+    def test_webhook_message_registered_to_right_handler(self):
+        from tests import app_stub
+        handlers = app_stub.eventmanager.handlers.get(plugin.EventType.WebhookMessage) or []
+        names = [getattr(h, "__name__", str(h)) for h in handlers]
+        self.assertIn("sync_del_by_webhook", names, f"WebhookMessage 未注册到事件处理器：{names}")
+        self.assertNotIn("get_api", names, "get_api 不得注册为事件处理器（会吞掉所有事件）")
+
+    def test_registered_handler_actually_processes_event(self):
+        """走注册入口（而不是直接调 _handle_event_data）验证端到端处理。"""
+        from types import SimpleNamespace
+        from tests import app_stub
+        rec = FakeRecord(71002, "某片", "/downloads/link/Movie/中国电影/某片 (2016)/某片 (2016) - 1080p.mkv")
+        instance, notifies = build_plugin([rec])
+        instance.save_data("history", [])
+        handlers = app_stub.eventmanager.handlers.get(plugin.EventType.WebhookMessage) or []
+        handler = [h for h in handlers if getattr(h, "__name__", "") == "sync_del_by_webhook"][-1]
+        ev = SimpleNamespace(event_data=SimpleNamespace(
+            event="library.deleted", item_type="Movie", media_type="Movie", item_name="某片",
+            item_path="/mnt/user/Media/Strm/Media/Movie/中国电影/某片 (2016)/某片 (2016) - 1080p.strm",
+            item_id="", provider_ids={}, json_object={}))
+        handler(instance, ev)
+        import time as _t
+        _t.sleep(0.5)
+        stages = [x.get("stage") for x in (instance.get_data("history") or [])]
+        self.assertIn("received", stages, "注册入口收到事件后应进入处理链")
+        self.assertNotIn("get_api", [getattr(h, "__name__", "") for h in handlers])
+
 
 if __name__ == "__main__":
     unittest.main()
