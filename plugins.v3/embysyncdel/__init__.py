@@ -325,7 +325,7 @@ class EmbySyncDel(_PluginBase):
     # 插件图标（放在仓库 icons/ 目录，填文件名即可）
     plugin_icon = "embysyncdel.png"
     # 插件版本
-    plugin_version = "1.5.6"
+    plugin_version = "1.5.7"
     # 插件作者
     plugin_author = "lutian98"
     # 作者主页
@@ -346,6 +346,9 @@ class EmbySyncDel(_PluginBase):
     _exclude_path: str = ""
     _del_source: bool = True
     _del_seed: bool = True
+    # 删除媒体后，若目录内只剩 nfo/海报/字幕等附属文件，一并清掉再剪空目录。
+    # 这些残壳会让媒体服务器下一次扫描重建条目，也会在媒体库里留下空的"电影"目录。
+    _clean_aux: bool = True
     _torrent_action: str = ACTION_DELETE
     _title_guard: bool = True
     _del_history: bool = False
@@ -394,6 +397,7 @@ class EmbySyncDel(_PluginBase):
             self._source_roots = str(config.get("source_roots") or "")
             self._del_source = bool(config.get("del_source", True))
             self._del_seed = bool(config.get("del_seed", True))
+            self._clean_aux = bool(config.get("clean_aux", True))
             self._seed_tags = str(config.get("seed_tags") or DEFAULT_SEED_TAGS)
             self._torrent_action = str(config.get("torrent_action") or ACTION_DELETE)
             self._title_guard = bool(config.get("title_guard", True))
@@ -415,6 +419,7 @@ class EmbySyncDel(_PluginBase):
                 "exclude_path": self._exclude_path,
                 "del_source": self._del_source,
                 "del_seed": self._del_seed,
+                "clean_aux": self._clean_aux,
                 "seed_tags": self._seed_tags,
                 "torrent_action": self._torrent_action,
                 "title_guard": self._title_guard,
@@ -649,6 +654,22 @@ class EmbySyncDel(_PluginBase):
                                     {
                                         "component": "VSwitch",
                                         "props": {
+                                            "model": "clean_aux",
+                                            "label": "清理残留的附属文件",
+                                            "hint": "删完影片后，若目录里只剩 nfo/海报/字幕，一并清掉并删除空目录；"
+                                                    "目录里还有媒体文件或子目录时不动。",
+                                            "persistent-hint": True,
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 3},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
                                             "model": "title_guard",
                                             "label": "标题防误删校验",
                                             "hint": "要求整理记录标题出现在删除媒体名中，避免误删同名不同片。",
@@ -739,6 +760,7 @@ class EmbySyncDel(_PluginBase):
             "exclude_path": "",
             "del_source": True,
             "del_seed": True,
+            "clean_aux": True,
             "seed_tags": DEFAULT_SEED_TAGS,
             "title_guard": True,
             "torrent_action": ACTION_DELETE,
@@ -1206,6 +1228,37 @@ class EmbySyncDel(_PluginBase):
             return [f"• 占位文件不存在或未挂载到 MoviePilot，已跳过：{media_path}"], True
         return self._remove_file(media_path, "占位文件(strm)")
 
+    def _purge_aux_files(self, directory: Path) -> bool:
+        """清掉目录里**仅剩**的附属文件（nfo/海报/字幕/外挂音轨）。
+
+        安全工作方式：只要目录里出现子目录、媒体文件或任何未知扩展名，就一律不碰
+        （返回 False），由上层停止剪枝。这样多集剧集目录、混放目录都不会被误清。
+
+        :return: True = 目录已是空的、可以继续 rmdir；False = 不可清理，停止剪枝
+        """
+        if not self._clean_aux:
+            return False
+        try:
+            entries = list(directory.iterdir())
+        except Exception:  # noqa: BLE001
+            return False
+        if not entries:
+            return True
+        for entry in entries:
+            if entry.is_dir() or not is_aux_ext(entry.name):
+                return False
+        removed = 0
+        for entry in entries:
+            try:
+                entry.unlink()
+                removed += 1
+            except Exception as err:  # noqa: BLE001
+                logger.warning(f"联动删除：清理附属文件失败 {entry}：{err}")
+                return False
+        if removed:
+            logger.info(f"联动删除：已清理附属文件 {removed} 个（{directory}）")
+        return True
+
     def _prune_empty_dirs(self, directory: Path, roots: Optional[List[str]] = None) -> None:
         """自底向上删除空目录，遇到非空目录、受保护目录或超出给定根即停止。
 
@@ -1224,6 +1277,10 @@ class EmbySyncDel(_PluginBase):
             return
         for _ in range(MAX_PRUNE_DEPTH):
             if current in protected or not current.is_dir():
+                return
+            # 目录里只剩 nfo/海报/字幕这类附属文件时，先清掉再判断是否为空；
+            # 否则空目录永远剪不掉，媒体服务器下次扫描还会把条目重建出来。
+            if not self._purge_aux_files(current):
                 return
             try:
                 next(current.iterdir())

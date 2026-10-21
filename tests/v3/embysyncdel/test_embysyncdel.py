@@ -380,6 +380,66 @@ class TestDeleteFlow(unittest.TestCase):
         self.assertEqual(instance._transferhis.deleted, [])
 
 
+class TestAuxCleanup(unittest.TestCase):
+    """删除媒体后，目录里只剩 nfo/海报/字幕时要一并清掉并剪掉空目录。"""
+
+    def _instance(self, **kw):
+        instance, _ = build_plugin([], dry_run=False, **kw)
+        return instance
+
+    def test_purges_aux_files_and_removes_dir(self):
+        import os
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            inst = self._instance()
+            d = os.path.join(td, "电影", "某片 (2020)")
+            os.makedirs(d)
+            for name in ("某片.mkv", "某片.nfo", "poster.jpg", "sub.srt"):
+                open(os.path.join(d, name), "w", encoding="utf-8").write("x")
+            os.remove(os.path.join(d, "某片.mkv"))       # 模拟媒体文件已被删
+            inst._prune_empty_dirs(plugin.Path(d), roots=[td])
+            self.assertFalse(os.path.exists(d), "只剩附属文件时目录应被整体清掉")
+
+    def test_keeps_dir_when_other_media_remains(self):
+        import os
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            inst = self._instance()
+            d = os.path.join(td, "TV", "某剧 (2020)", "Season 1")
+            os.makedirs(d)
+            for name in ("E01.mkv", "E02.mkv", "poster.jpg"):
+                open(os.path.join(d, name), "w", encoding="utf-8").write("x")
+            os.remove(os.path.join(d, "E01.mkv"))
+            inst._prune_empty_dirs(plugin.Path(d), roots=[td])
+            self.assertTrue(os.path.exists(d), "还有其他剧集时目录不能删")
+            self.assertTrue(os.path.exists(os.path.join(d, "poster.jpg")), "附属文件也不能先删")
+
+    def test_unknown_extension_blocks_cleanup(self):
+        import os
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            inst = self._instance()
+            d = os.path.join(td, "电影", "某片 (2020)")
+            os.makedirs(d)
+            for name in ("某片.nfo", "weird.xyz"):
+                open(os.path.join(d, name), "w", encoding="utf-8").write("x")
+            inst._prune_empty_dirs(plugin.Path(d), roots=[td])
+            self.assertTrue(os.path.exists(d), "未知类型一律不碰（fail-closed）")
+            self.assertTrue(os.path.exists(os.path.join(d, "某片.nfo")))
+
+    def test_switch_off_keeps_aux_files(self):
+        import os
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            inst = self._instance()
+            inst._clean_aux = False
+            d = os.path.join(td, "电影", "某片 (2020)")
+            os.makedirs(d)
+            open(os.path.join(d, "某片.nfo"), "w", encoding="utf-8").write("x")
+            inst._prune_empty_dirs(plugin.Path(d), roots=[td])
+            self.assertTrue(os.path.exists(os.path.join(d, "某片.nfo")), "开关关闭时不清理附属文件")
+
+
 class TestLazyGuards(unittest.TestCase):
     """辅助函数。"""
 
