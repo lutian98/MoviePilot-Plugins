@@ -44,6 +44,10 @@ Emby 删除影片 / 剧集后，同步清理 MoviePilot 侧的整理记录、源
 → 删 strm 占位 → 最后删整理记录 → 通知
 ```
 
+## 产品需求文档
+
+- [PRD：Emby 联动删除](../../docs/PRD-EmbySyncDel.md) —— 背景、目标、功能/非功能需求、验收标准、已知限制
+
 ## 测试
 
 测试位于仓库 `tests/v3/embysyncdel/`，桩掉宿主 `app.*`，无需 MoviePilot 即可运行：
