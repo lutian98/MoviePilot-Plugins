@@ -53,7 +53,7 @@ class Brush2Pan(_PluginBase):
     plugin_name = "刷流直传 115"
     plugin_desc = "刷流完成的影片按口径筛选后，经 CD2 直传 115 固定目录并按 TMDB 重命名"
     plugin_icon = "brush2pan.png"
-    plugin_version = "0.2.6"
+    plugin_version = "0.2.7"
     plugin_author = "lutian98"
     author_url = ""
     plugin_config_prefix = "brush2pan_"
@@ -211,8 +211,8 @@ class Brush2Pan(_PluginBase):
         def nav_js(action):
             return ("(function(el,a){var w=el.closest('.b2p-wrap');if(!w)return;"
                     "var rows=w.querySelectorAll('.b2p-row');var size=+w.dataset.size;var page=+w.dataset.page;"
-                    "var pages=Math.max(1,Math.ceil(rows.length/size));"
                     "if(a==='next')page++;else if(a==='prev')page--;else if(a.charAt(0)==='s'){size=+a.slice(1);page=1;}"
+                    "var pages=Math.max(1,Math.ceil(rows.length/size));"
                     "page=Math.min(Math.max(1,page),pages);w.dataset.page=page;w.dataset.size=size;"
                     "for(var i=0;i<rows.length;i++){rows[i].style.display=(i>=(page-1)*size&&i<page*size)?'':'none';}"
                     "var info=w.querySelector('.b2p-info');if(info)info.textContent='第 '+page+'/'+pages+' 页 · 每页 '+size+' 条';"
