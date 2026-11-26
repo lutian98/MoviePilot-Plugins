@@ -53,7 +53,7 @@ class Brush2Pan(_PluginBase):
     plugin_name = "刷流直传 115"
     plugin_desc = "刷流完成的影片按口径筛选后，经 CD2 直传 115 固定目录并按 TMDB 重命名"
     plugin_icon = "brush2pan.png"
-    plugin_version = "0.2.0"
+    plugin_version = "0.2.1"
     plugin_author = "lutian98"
     author_url = ""
     plugin_config_prefix = "brush2pan_"
@@ -660,6 +660,16 @@ class Brush2Pan(_PluginBase):
                 state[h] = rec
                 self.save_data("state_v2", state)
                 continue
+            try:
+                if self._cd2_find(dst_dir, f"{dst_dir}/{fname}"):
+                    rec["status"] = "done"
+                    rec["finished"] = time.time()
+                    state[h] = rec
+                    logger.info(f"刷流直传：目标已存在，跳过 {dst_dir}/{fname}")
+                    self.save_data("state_v2", state)
+                    continue
+            except Exception:
+                pass
             try:
                 self._cd2("CreateFolder", {"parentPath": self._dest_root, "folderName": folder})
             except Exception as e:  # noqa: BLE001
