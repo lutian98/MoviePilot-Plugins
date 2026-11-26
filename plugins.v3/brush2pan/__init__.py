@@ -60,7 +60,7 @@ class Brush2Pan(_PluginBase):
     plugin_name = "刷流直传 115"
     plugin_desc = "刷流完成的影片按口径筛选后，经 CD2 直传 115 固定目录并按 TMDB 重命名"
     plugin_icon = "brush2pan.png"
-    plugin_version = "0.3.2"
+    plugin_version = "0.3.3"
     plugin_author = "lutian98"
     author_url = ""
     plugin_config_prefix = "brush2pan_"
@@ -95,6 +95,7 @@ class Brush2Pan(_PluginBase):
         try:
             self._min_size_mb = int(cfg.get("min_size_mb") or 300)
             self._imdb_adult_check = bool(cfg.get("imdb_adult_check", True))
+            self._imdb_lock = threading.Lock()
             if self._imdb_adult_check:
                 try:
                     self._imdb_ensure(background=True)
@@ -636,6 +637,15 @@ class Brush2Pan(_PluginBase):
         return True
 
     def _imdb_update(self) -> None:
+        if not self._imdb_lock.acquire(blocking=False):
+            logger.info("刷流直传：IMDb 更新已在进行，跳过重复任务")
+            return
+        try:
+            self._imdb_update_locked()
+        finally:
+            self._imdb_lock.release()
+
+    def _imdb_update_locked(self) -> None:
         d = self._imdb_dir()
         d.mkdir(parents=True, exist_ok=True)
         ds = d / "title.basics.tsv.gz"
