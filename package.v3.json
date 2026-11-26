@@ -38,7 +38,7 @@
     "name": "刷流直传 115",
     "description": "刷流完成的影片按口径筛选后，经 CD2 直传 115 固定目录并按 TMDB 重命名。",
     "labels": "刷流,115,文件整理",
-    "version": "0.3.6",
+    "version": "0.3.7",
     "icon": "brush2pan.png",
     "author": "lutian98",
     "level": 1,
@@ -71,7 +71,8 @@
       "v0.3.3": "IMDb 数据集更新加互斥锁，避免 init 预下载与手动/重载同时更新产生的 .part 竞争与告警。",
       "v0.3.4": "IMDb 数据集仍在 7 天有效期内时不再重复下载，只重建索引；/imdbupdate?rebuild=1 可强制只重建索引。",
       "v0.3.5": "文案修正：IMDb Adult 命中拒绝原因由「色情」改为「成人影片（IMDb Adult tt…，口径：排除）」，/imdbcheck 同步。",
-      "v0.3.6": "P0 修复：配置属性 _imdb_adult_check 覆盖同名方法，导致 scan 每轮在 IMDb 检查处抛 TypeError('bool' object is not callable)，0.3.2~0.3.5 期间新种子全部不处理。重命名为 _imdb_enabled。"
+      "v0.3.6": "P0 修复：配置属性 _imdb_adult_check 覆盖同名方法，导致 scan 每轮在 IMDb 检查处抛 TypeError('bool' object is not callable)，0.3.2~0.3.5 期间新种子全部不处理。重命名为 _imdb_enabled。",
+      "v0.3.7": "P1 修复批次：词边界解析（Hidden Figures/1917/Blade Runner 2049）、AUX 词边界（Extraction）、m2ts/iso 识别原盘、CD2 success/size 校验、FindFileByPath fail-closed、去重查 target+orig、rename 失败不标 done、copying 看门狗、per-torrent 异常隔离、临时失败重试（3 次退避）、TMDB 精确匹配+时长校验、IMDb 检查未就绪/出错改为重试、页面展示重试/等待/错误状态、HTML 引号转义。"
     }
   }
 }
