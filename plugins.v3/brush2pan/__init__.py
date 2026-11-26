@@ -34,19 +34,69 @@ from app.sdk.logging import logger
 from app.sdk.plugin import _PluginBase
 from app.sdk.services import DownloaderHelper
 
-VIDEO_EXT = {".mkv", ".mp4", ".avi", ".ts", ".mov", ".wmv", ".flv", ".webm"}
+VIDEO_EXT = {".mkv", ".mp4", ".avi", ".ts", ".mov", ".wmv", ".flv", ".webm", ".m2ts", ".iso"}
 BAD_GENRE_IDS = {27: "恐怖", 53: "惊悚"}
 IMDB_DATASET_URL = "https://datasets.imdbws.com/title.basics.tsv.gz"
 IMDB_MAX_AGE_DAYS = 7
 AUDIO_BAD = re.compile(r"(?i)5\.1")
-AUX_RE = re.compile(r"(?i)(sample|trailer|featurette|behind[ ._-]?the[ ._-]?scenes|extras?|bonus|teaser|花絮|预告|样片)")
-EP_RE = re.compile(r"(?i)S\d{2,3}(E\d{1,3})?")
-MARKER_RE = re.compile(
-    r"(?i)(?:S\d{2,3}(?:E\d{1,3})?|\b(?:19|20)\d{2}\b|2160p|1080p|720p|480p|"
-    r"WEB[ -]?DL|WEBRip|BluRay|Blu-ray|HDTV|REMUX|UHD|HDR|DoVi|DV|"
-    r"HEVC|AVC|x264|x265|H\.?264|H\.?265|AAC|DDP|DD\+|DD|Atmos|TrueHD|DTS|FLAC|"
-    r"10bit|8bit|REPACK|PROPER|Extended|Unrated)"
-)
+RETRY_DELAYS = (300, 900, 3600)
+MAX_RETRY = 3
+COPY_TIMEOUT = 7200
+# token 化的标记识别：按分隔符切 token，避免 "dd"/"dv" 子串误伤片名（Hidden.Figures → Hi）
+TOKEN_SPLIT_RE = re.compile(r"[^0-9A-Za-z\u4e00-\u9fff]+")
+MARKER_TOKENS = {
+    "2160p", "1080p", "720p", "480p", "4k", "uhd", "hdr", "hdr10", "hdr10plus",
+    "dovi", "dv", "webdl", "web", "webrip", "web-dl", "bluray", "blu", "ray",
+    "hdtv", "remux", "hevc", "avc", "x264", "x265", "h264", "h265",
+    "aac", "ddp", "dd", "atmos", "truehd", "dts", "dtshd", "dtsma", "flac",
+    "10bit", "8bit", "repack", "proper", "extended", "unrated", "complete",
+    "bd", "bdrip", "brrip", "dvdrip", "hdr10p", "dvhe", "dvhe",
+}
+AUX_TOKENS = {"sample", "samples", "trailer", "trailers", "featurette",
+              "featurettes", "extra", "extras", "bonus", "teaser", "teasers",
+              "花絮", "预告", "样片"}
+RES_TOKENS = {"2160p", "1080p", "720p", "480p", "4k"}
+EP_TOKEN_RE = re.compile(r"(?i)^s(\d{2,3})(e\d{1,3})?$")
+YEAR_RE = re.compile(r"(?<![0-9])((?:19|20)\d{2})(?![0-9])")
+AUDIO_BAD = re.compile(r"(?i)5\.1")
+RETRY_DELAYS = (300, 900, 3600)
+MAX_RETRY = 3
+COPY_TIMEOUT = 7200
+
+
+def _tokens(name: str) -> list:
+    return [t for t in TOKEN_SPLIT_RE.split(name or "") if t]
+
+
+def _is_marker_token(tok: str) -> bool:
+    t = tok.lower()
+    if t in MARKER_TOKENS:
+        return True
+    if re.match(r"^(x|h)26[45]$", t):
+        return True
+    if re.match(r"^(ddp?|aac|dts|flac)(\d(?:\.\d)?)?$", t):
+        return True
+    return False
+
+
+def _is_aux(name: str) -> bool:
+    parts = [p.lower() for p in _tokens(name)]
+    if any(p in AUX_TOKENS for p in parts):
+        return True
+    low = " ".join(parts)
+    if "behind the scenes" in low or "behind scenes" in low:
+        return True
+    return False
+
+
+def _is_disc(name: str) -> bool:
+    low = (name or "").lower()
+    if low.endswith(".m2ts") or low.endswith(".iso"):
+        return True
+    if "/bdmv/" in low or low.startswith("bdmv/") or "bdmv" in [t.lower() for t in _tokens(name)]:
+        return True
+    return False
+
 
 GRPCURL_VERSION = "1.9.1"
 GRPCURL_URL = (
@@ -60,7 +110,7 @@ class Brush2Pan(_PluginBase):
     plugin_name = "刷流直传 115"
     plugin_desc = "刷流完成的影片按口径筛选后，经 CD2 直传 115 固定目录并按 TMDB 重命名"
     plugin_icon = "brush2pan.png"
-    plugin_version = "0.3.6"
+    plugin_version = "0.3.7"
     plugin_author = "lutian98"
     author_url = ""
     plugin_config_prefix = "brush2pan_"
@@ -263,7 +313,7 @@ class Brush2Pan(_PluginBase):
         done = sum(1 for r in rows if r["status"] == "done")
         review = sum(1 for r in rows if r["status"] == "review")
         other = total - done - review
-        esc = lambda x: (str(x).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+        esc = lambda x: (str(x).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("'", "&#x27;").replace('"', "&quot;"))
         badge = {
             "done": ("#2e7d32", "rgba(46,125,50,.15)"),
             "review": ("#c62828", "rgba(198,40,40,.15)"),
@@ -275,7 +325,7 @@ class Brush2Pan(_PluginBase):
         }
         status_cn = {"done": "已上传", "review": "拒绝/跳过", "downloading": "下载中",
                      "pending": "待处理", "copying": "复制中", "planned": "演练计划",
-                     "error": "出错"}
+                     "retry": "重试中", "waiting": "等待文件", "error": "出错"}
         trs = []
         for idx, r in enumerate(ordered):
             fg, bg = badge.get(r["status"], ("#555", "rgba(128,128,128,.15)"))
@@ -359,13 +409,19 @@ class Brush2Pan(_PluginBase):
                 status, reason = "review", rec.get("reason") or "被拒绝"
             elif rec.get("status") == "planned":
                 status, reason = "planned", rec.get("target_name") or "演练计划"
+            elif rec.get("status") == "retry":
+                status, reason = "retry", rec.get("reason") or "重试中"
+            elif rec.get("status") == "waiting":
+                status, reason = "waiting", rec.get("reason") or "等待文件就绪"
+            elif rec.get("status") == "error":
+                status, reason = "error", rec.get("reason") or rec.get("error") or "出错"
             else:
                 status = "downloading" if progress < 0.999 else "pending"
                 reason = f"下载中 {progress*100:.1f}%" if progress < 0.999 else "等待下一轮扫描"
             rows.append({
                 "status_cn": {"done": "已上传", "review": "拒绝/跳过", "downloading": "下载中",
                               "pending": "待处理", "copying": "复制中", "planned": "演练计划",
-                              "error": "出错"}.get(status, status),
+                              "retry": "重试中", "waiting": "等待文件", "error": "出错"}.get(status, status),
                 "name": getattr(t, "name", ""),
                 "size": f"{(getattr(t,'size',0) or 0)/2**30:.2f}GB",
                 "progress": f"{progress*100:.1f}%",
@@ -540,11 +596,31 @@ class Brush2Pan(_PluginBase):
             raise RuntimeError(out[:300])
         return json.loads(out) if out else {}
 
+    def _cd2_checked(self, method: str, payload: Optional[dict] = None, timeout: int = 60) -> dict:
+        """调用 CD2 写操作并校验 FileOperationResult.success；失败抛异常（调用方按临时错误重试）。"""
+        data = self._cd2(method, payload, timeout=timeout)
+        if isinstance(data, dict):
+            if "success" in data and data.get("success") is False:
+                raise RuntimeError(f"{method} 失败: {data.get('errorMessage') or data}")
+            if method == "CreateFolder" and not data.get("folderCreated"):
+                raise RuntimeError("CreateFolder 未返回 folderCreated")
+        return data
+
     def _cd2_find(self, parent: str, path: str) -> Optional[dict]:
+        """查文件；NotFound 返回 None，其它错误（token/网络/协议）抛异常，调用方必须 fail-closed。"""
         try:
             return self._cd2("FindFileByPath", {"parentPath": parent, "path": path})
+        except RuntimeError as e:
+            if "NotFound" in str(e) or "not found" in str(e).lower():
+                return None
+            raise
+
+    @staticmethod
+    def _size_of(found: dict) -> int:
+        try:
+            return int((found or {}).get("size") or 0)
         except Exception:
-            return None
+            return 0
 
     # ---------------- 识别 / 判定 ----------------
     @staticmethod
@@ -552,20 +628,34 @@ class Brush2Pan(_PluginBase):
         stem = os.path.splitext(os.path.basename(filename))[0]
         cn = None
         m = re.match(r"^\[([^\]]+)\]", stem)
-        stem2 = stem
+        body = stem
         if m:
             cn = m.group(1).strip()
-            stem2 = stem[m.end():]
-        ym = re.search(r"(?<![0-9])((?:19|20)\d{2})(?![0-9])", stem2)
-        year = int(ym.group(1)) if ym else None
-        rm = re.search(r"(?i)(2160p|1080p|720p|480p)", stem2)
-        res = rm.group(1).lower() if rm else None
-        tv = bool(re.search(r"(?i)S\d{2,3}(E\d{1,3})?", stem2))
-        cut = MARKER_RE.search(stem2)
-        raw = stem2[:cut.start()] if cut else stem2
-        raw = re.sub(r"[._]+", " ", raw).strip(" -[]()")
-        raw = re.sub(r"\s+", " ", raw)
-        return {"title": cn or raw, "year": year, "resolution": res, "is_tv": tv, "cn": cn}
+            body = stem[m.end():]
+        toks = _tokens(body)
+        res = None
+        for t in toks:
+            lt = t.lower()
+            if lt in RES_TOKENS:
+                res = "2160p" if lt == "4k" else lt
+                break
+        years = [int(t) for t in toks if re.fullmatch(r"(?:19|20)\d{2}", t)]
+        year = years[-1] if years else None
+        cut_idx = len(toks)
+        for i, t in enumerate(toks):
+            if _is_marker_token(t) or EP_TOKEN_RE.match(t):
+                cut_idx = i
+                break
+        title_toks = toks[:cut_idx]
+        while title_toks and re.fullmatch(r"(?:19|20)\d{2}", title_toks[-1]) and int(title_toks[-1]) == (year if year is not None else -1):
+            title_toks.pop()
+        if not title_toks:
+            title_toks = [t for t in toks if not _is_marker_token(t) and not EP_TOKEN_RE.match(t)]
+        title = " ".join(title_toks).strip(" -_")
+        if not title:
+            title = body.strip()
+        tv = any(EP_TOKEN_RE.match(t) for t in toks) or bool(re.search(r"(?i)S\d{2,3}(E\d{1,3})?", body))
+        return {"title": cn or title, "year": year, "resolution": res, "is_tv": tv, "cn": cn}
 
     @staticmethod
     def _title_variants(title: str) -> List[str]:
@@ -721,25 +811,32 @@ class Brush2Pan(_PluginBase):
 
     def _imdb_adult_check(self, tmdb: dict):
         """用 IMDb 数据集的 Adult 类型/isAdult 标记判断色情片。
-        返回 (reject: Optional[bool], reason)；索引未就绪时 return (None, ...) 不阻断。"""
+        返回 (reject, reason, kind)；kind: adult/ok/disabled/no_id/not_ready/error"""
         if not getattr(self, "_imdb_enabled", True):
-            return None, "IMDb 过滤未启用"
+            return None, "IMDb 过滤未启用", "disabled"
         imdb_id = None
         try:
             r = requests.get(f"https://api.themoviedb.org/3/movie/{tmdb.get('id')}/external_ids",
                              params={"api_key": self._tmdb_key}, timeout=20, proxies=self._proxies())
             if r.status_code == 200:
                 imdb_id = (r.json() or {}).get("imdb_id")
-        except Exception:
-            pass
+            else:
+                return None, f"IMDb 查询失败 HTTP {r.status_code}", "error"
+        except Exception as e:  # noqa: BLE001
+            return None, f"IMDb 查询失败: {e}", "error"
         if not imdb_id:
-            return None, "无 IMDb ID"
+            return None, "无 IMDb ID", "no_id"
         st = self._imdb_status()
         if not st["index"]:
             self._imdb_ensure(background=True)
-            return None, "IMDb 索引未就绪（后台构建中）"
-        bad = imdb_id in (self._imdb_set() or set())
-        return (True, f"成人影片（IMDb Adult {imdb_id}，口径：排除）") if bad else (False, f"IMDb {imdb_id} 非成人")
+            return None, "IMDb 索引未就绪（后台构建中）", "not_ready"
+        adult_set = self._imdb_set()
+        if adult_set is None:
+            return None, "IMDb 索引读取失败", "error"
+        bad = imdb_id in adult_set
+        if bad:
+            return True, f"成人影片（IMDb Adult {imdb_id}，口径：排除）", "adult"
+        return False, f"IMDb {imdb_id} 非成人", "ok"
 
     def _genre_check(self, tmdb: dict, is_tv: bool = False):
         """题材/分级口径：排除恐怖(27)、惊悚(53)；类型为空视为未知直接拒；adult=true 拒。"""
@@ -758,7 +855,12 @@ class Brush2Pan(_PluginBase):
             return False, f"题材排除（{'/'.join(bad)}）", detail
         return True, "题材通过（" + "/".join(names) + "）", detail
 
+    @staticmethod
+    def _norm_title(x: str) -> str:
+        return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", (x or "").lower())
+
     def _tmdb_search_one(self, title: str, year: Optional[int], is_tv: bool) -> Optional[dict]:
+        self._tmdb_transient = False
         path = "search/tv" if is_tv else "search/movie"
         params = {"api_key": self._tmdb_key, "query": title, "language": "zh-CN"}
         if year:
@@ -774,20 +876,23 @@ class Brush2Pan(_PluginBase):
                 r = requests.get("https://api.themoviedb.org/3/" + path, params=params,
                                  timeout=20, proxies=self._proxies())
                 results = r.json().get("results") or []
+            want = self._norm_title(title)
             best = None
             for item in results:
                 name = item.get("title") or item.get("name") or ""
                 date = item.get("release_date") or item.get("first_air_date") or ""
                 ry = int(date[:4]) if date[:4].isdigit() else None
-                score = 5 if name.strip().lower() == title.strip().lower() else 0
+                exact = self._norm_title(name) == want
+                score = 5 if exact else 0
                 if year and ry == year:
                     score += 5
                 elif year and ry and abs(ry - year) <= 1:
                     score += 2
-                if best is None or score > best[0]:
+                if exact and (best is None or score > best[0]):
                     best = (score, item)
             return best[1] if best else None
         except Exception as e:  # noqa: BLE001
+            self._tmdb_transient = True
             logger.warning(f"刷流直传：TMDB 查询失败 {title}: {e}")
             return None
 
@@ -942,12 +1047,17 @@ class Brush2Pan(_PluginBase):
             return None
 
     def _select_video(self, files):
-        """从文件列表里挑主视频：剔除样片/花絮/小文件，识别剧集/多碟合集。
-        返回 (video_attr, code, count)；code: ok / no_files / tv / multi
+        """从文件列表里挑主视频：剔除样片/花絮/小文件，识别剧集/多碟/原盘。
+        返回 (video_attr, code, count)；code: ok / no_files / tv / multi / aux_only / disc
         """
         vids = [f for f in files
                 if os.path.splitext(getattr(f, "name", ""))[1].lower() in VIDEO_EXT
                 and (getattr(f, "progress", 0) or 0) >= 0.999]
+        if not vids:
+            return None, "no_files", 0
+        if all(_is_disc(getattr(f, "name", "") or "") for f in vids):
+            return None, "disc", len(vids)
+        vids = [f for f in vids if not _is_disc(getattr(f, "name", "") or "")]
         if not vids:
             return None, "no_files", 0
         main = max(vids, key=lambda f: getattr(f, "size", 0) or 0)
@@ -958,17 +1068,54 @@ class Brush2Pan(_PluginBase):
             if f is main:
                 continue
             size = getattr(f, "size", 0) or 0
-            if AUX_RE.search(getattr(f, "name", "") or "") or (main_size and size < main_size * 0.05):
+            if _is_aux(getattr(f, "name", "") or "") or (main_size and size < main_size * 0.05):
                 aux.append(f)
             else:
                 rest.append(f)
-        if AUX_RE.search(getattr(main, "name", "") or "") and not rest:
+        if _is_aux(getattr(main, "name", "") or "") and not rest:
             return None, "aux_only", len(vids)
-        if EP_RE.search(getattr(main, "name", "") or ""):
+        if EP_TOKEN_RE.search(os.path.basename(main.name)) or re.search(r"(?i)S\d{2,3}(E\d{1,3})?", main.name):
             return None, "tv", len(vids) - len(aux)
         if rest:
             return None, "multi", len(vids) - len(aux)
         return main, "ok", len(aux)
+
+    def _media_duration(self, video: dict) -> Optional[float]:
+        path = os.path.join(self._save_prefix, (video.get("name") or "").lstrip("/"))
+        ffprobe = shutil.which("ffprobe") or "/usr/local/bin/ffprobe"
+        try:
+            r = subprocess.run([ffprobe, "-v", "quiet", "-print_format", "json", "-show_format", path],
+                               capture_output=True, text=True, timeout=60)
+            if r.returncode != 0:
+                return None
+            dur = float(json.loads(r.stdout or "{}").get("format", {}).get("duration") or 0)
+            return dur or None
+        except Exception:
+            return None
+
+    def _schedule_retry(self, state: dict, h: str, name: str, reason: str) -> str:
+        rec = state.get(h) or {}
+        attempts = int(rec.get("attempts") or 0) + 1
+        if attempts > MAX_RETRY:
+            state[h] = {"status": "review", "name": name,
+                        "reason": f"重试失败：{reason}", "attempts": attempts, "ts": time.time()}
+            logger.info(f"刷流直传：REJECT {name} → 重试失败：{reason}")
+            return "review"
+        delay = RETRY_DELAYS[min(attempts - 1, len(RETRY_DELAYS) - 1)]
+        state[h] = {"status": "retry", "name": name, "reason": reason,
+                    "attempts": attempts, "next_ts": time.time() + delay, "ts": time.time()}
+        logger.info(f"刷流直传：RETRY {name} → {reason}（第{attempts}次，{delay}s 后）")
+        return "retry"
+
+    def _copy_task_of(self, src: str, dst: str) -> Optional[dict]:
+        try:
+            tasks = self._cd2("GetCopyTasks").get("copyTasks", []) or []
+        except Exception:
+            return None
+        for task in tasks:
+            if task.get("sourcePath") == src and task.get("destPath") == dst:
+                return task
+        return None
 
     def scan(self) -> None:
         if not self._enabled:
@@ -984,165 +1131,283 @@ class Brush2Pan(_PluginBase):
             logger.warning(f"刷流直传：列举种子失败: {e}")
             return
         for t in torrents:
-            save_path = getattr(t, "save_path", "") or ""
-            if not save_path.startswith(self._save_prefix):
-                continue
-            h = getattr(t, "hash", "")
-            rec = state.get(h)
-            if rec and rec.get("status") == "review" and str(rec.get("reason", "")).startswith("视频文件数="):
+            try:
+                self._process_torrent(t, state, client)
+            except Exception as e:  # noqa: BLE001
+                h = getattr(t, "hash", "")
+                logger.warning(f"刷流直传：处理种子异常 {getattr(t,'name','')}: {e}")
+                if h:
+                    self._schedule_retry(state, h, getattr(t, "name", ""), f"处理异常: {e}")
+                    self.save_data("state_v2", state)
+        self.save_data("state_v2", state)
+
+    def _process_torrent(self, t, state: dict, client) -> None:
+        save_path = getattr(t, "save_path", "") or ""
+        if not save_path.startswith(self._save_prefix):
+            return
+        h = getattr(t, "hash", "")
+        name = getattr(t, "name", "")
+        rec = state.get(h)
+        if rec and rec.get("status") == "review" and str(rec.get("reason", "")).startswith("视频文件数="):
+            state.pop(h, None)
+            rec = None
+        if rec:
+            st = rec.get("status")
+            if st in ("done", "review"):
+                return
+            if st == "copying":
+                result, reason = self._check_copying(rec)
+                if result == "done":
+                    self.save_data("state_v2", state)
+                    return
+                if result == "error":
+                    self._schedule_retry(state, h, name, reason)
+                elif time.time() - float(rec.get("copy_started") or rec.get("ts") or 0) > COPY_TIMEOUT:
+                    self._schedule_retry(state, h, name, "复制超时（2 小时）")
+                self.save_data("state_v2", state)
+                return
+            if st == "retry":
+                if time.time() < float(rec.get("next_ts") or 0):
+                    return
                 state.pop(h, None)
                 rec = None
-            if rec and rec.get("status") in ("done", "review", "error"):
-                continue
-            if rec and rec.get("status") == "copying":
-                self._check_copying(rec)
-                self.save_data("state_v2", state)
-                continue
-            if (getattr(t, "progress", 0) or 0) < 0.999:
-                continue
-            try:
-                files = client.torrents_files(torrent_hash=h)
-            except Exception as e:  # noqa: BLE001
-                logger.warning(f"刷流直传：读取文件失败 {getattr(t,'name','')}: {e}")
-                continue
-            picked, code, ignored = self._select_video(files)
-            if code == "no_files":
-                # 文件列表可能尚未落盘/元数据未同步，下一轮重试，不写死 review
-                logger.info(f"刷流直传：文件未就绪，稍后重试 {getattr(t,'name','')}")
-                continue
-            if code == "aux_only":
-                state[h] = {"status": "review", "name": getattr(t, "name", ""),
-                            "reason": "仅样片/花絮，无正片", "ts": time.time()}
-                logger.info(f"刷流直传：跳过 {getattr(t,'name','')}（仅样片/花絮）")
-                self.save_data("state_v2", state)
-                continue
-            if code == "tv":
-                state[h] = {"status": "review", "name": getattr(t, "name", ""),
-                            "reason": "剧集（口径：不收剧集）", "ts": time.time()}
-                logger.info(f"刷流直传：REJECT {getattr(t,'name','')} → 剧集")
-                self.save_data("state_v2", state)
-                continue
-            if code == "multi":
-                state[h] = {"status": "review", "name": getattr(t, "name", ""),
-                            "reason": f"视频文件数={ignored}（疑似剧集/合集）", "ts": time.time()}
-                logger.info(f"刷流直传：跳过 {getattr(t,'name','')}（实质视频数={ignored}）")
-                self.save_data("state_v2", state)
-                continue
-            if ignored:
-                logger.info(f"刷流直传：忽略 {ignored} 个样片/花絮文件 {getattr(t,'name','')}")
-            video = {"name": picked.name, "size": picked.size}
-            meta = self._parse_release(video["name"])
-            if meta["is_tv"]:
-                state[h] = {"status": "review", "name": getattr(t, "name", ""),
-                            "reason": "剧集（口径：不收剧集）", "meta": meta, "ts": time.time()}
-                logger.info(f"刷流直传：REJECT {getattr(t,'name','')} → 剧集")
-                self.save_data("state_v2", state)
-                continue
-            tmdb = self._tmdb_search(meta["cn"] or meta["title"], meta["year"], meta["is_tv"])
-            if not tmdb:
-                state[h] = {"status": "review", "name": getattr(t, "name", ""), "reason": "TMDB 未识别",
-                            "meta": meta, "ts": time.time()}
-                logger.info(f"刷流直传：TMDB 未识别 {meta['title']} {meta['year']}")
-                self.save_data("state_v2", state)
-                continue
-            genre_ok, genre_reason, genre_detail = self._genre_check(tmdb, meta["is_tv"])
-            if not genre_ok:
-                state[h] = {"status": "review", "name": getattr(t, "name", ""),
-                            "reason": genre_reason, "meta": meta, "tmdb": tmdb.get("id"),
-                            "genres": [g.get("name") for g in ((genre_detail or {}).get("genres") or []) if isinstance(g, dict)],
-                            "ts": time.time()}
-                logger.info(f"刷流直传：REJECT {getattr(t,'name','')} → {genre_reason}")
-                self.save_data("state_v2", state)
-                continue
-            imdb_bad, imdb_reason = self._imdb_adult_check(tmdb)
-            if imdb_bad:
-                state[h] = {"status": "review", "name": getattr(t, "name", ""),
-                            "reason": imdb_reason, "meta": meta, "tmdb": tmdb.get("id"), "ts": time.time()}
-                logger.info(f"刷流直传：REJECT {getattr(t,'name','')} → {imdb_reason}")
-                self.save_data("state_v2", state)
-                continue
-            chs_meta = {"tmdb_lang": tmdb.get("original_language"),
-                        "tmdb_title": tmdb.get("title") or tmdb.get("name")}
-            chs_ok, chs_reason = (True, "未检查") if not self._require_chs else self._has_chs(video, files, chs_meta)
-            audio_ok, audio_reason = self._audio_check(video)
-            if not audio_ok:
-                state[h] = {"status": "review", "name": getattr(t, "name", ""),
-                            "reason": audio_reason, "meta": meta, "tmdb": tmdb.get("id"), "ts": time.time()}
-                logger.info(f"刷流直传：REJECT {getattr(t,'name','')} → {audio_reason}")
-                self.save_data("state_v2", state)
-                continue
-            ok, reason = self._judge(meta, video, chs_ok, chs_reason)
-            if not ok:
-                state[h] = {"status": "review", "name": getattr(t, "name", ""), "reason": reason,
-                            "meta": meta, "ts": time.time()}
-                logger.info(f"刷流直传：REJECT {getattr(t,'name','')} → {reason}")
-                self.save_data("state_v2", state)
-                continue
-            year, folder, fname = self._build_names(meta, tmdb, video)
-            src = f"{self._src_prefix}/{video['name'].lstrip('/')}"
-            dst_dir = f"{self._dest_root}/{folder}"
-            rec = {"status": "copying" if not self._dry_run else "planned",
-                   "name": getattr(t, "name", ""), "title": tmdb.get("title") or tmdb.get("name"),
-                   "year": year, "tmdb": tmdb.get("id"), "src": src, "dst_dir": dst_dir,
-                   "orig_name": os.path.basename(video["name"]), "target_name": fname,
-                   "size": video["size"], "audio": audio_reason, "ts": time.time()}
-            if self._dry_run:
-                logger.info(f"刷流直传：PLAN {src} → {dst_dir}/{fname}")
-                state[h] = rec
-                self.save_data("state_v2", state)
-                continue
-            try:
-                if self._cd2_find(dst_dir, f"{dst_dir}/{fname}"):
-                    rec["status"] = "done"
-                    rec["finished"] = time.time()
-                    state[h] = rec
-                    logger.info(f"刷流直传：目标已存在，跳过 {dst_dir}/{fname}")
-                    self.save_data("state_v2", state)
-                    continue
-            except Exception:
+            elif st == "waiting":
+                # 继续往下走：若文件已就绪则重新处理
                 pass
-            try:
-                self._cd2("CreateFolder", {"parentPath": self._dest_root, "folderName": folder})
-            except Exception as e:  # noqa: BLE001
-                logger.warning(f"刷流直传：建目录失败（可能已存在）: {e}")
-            try:
-                self._cd2("CopyFile", {"theFilePaths": [src], "destPath": dst_dir,
-                                       "conflictPolicy": "Rename"}, timeout=120)
-                rec["copy_started"] = time.time()
-                state[h] = rec
-                logger.info(f"刷流直传：COPY {src} → {dst_dir}/{fname}")
-            except Exception as e:  # noqa: BLE001
-                rec["status"] = "error"
-                rec["error"] = str(e)[:200]
-                state[h] = rec
-                logger.warning(f"刷流直传：复制失败 {src}: {e}")
-            self.save_data("state_v2", state)
-
-    def _check_copying(self, rec: dict) -> None:
-        folder = rec["dst_dir"]
-        orig = f"{folder}/{rec['orig_name']}"
-        found = self._cd2_find(folder, orig)
-        if found:
-            target = f"{folder}/{rec['target_name']}"
-            if os.path.basename(found.get("fullPathName", "")) != rec["target_name"]:
-                try:
-                    self._cd2("RenameFile", {"theFilePath": found["fullPathName"],
-                                             "newName": rec["target_name"]})
-                    logger.info(f"刷流直传：RENAME → {rec['target_name']}")
-                except Exception as e:  # noqa: BLE001
-                    logger.warning(f"刷流直传：重命名失败: {e}")
-            rec["status"] = "done"
-            rec["finished"] = time.time()
-            logger.info(f"刷流直传：DONE {target}")
+            elif st == "error":
+                state.pop(h, None)
+                rec = None
+            elif st == "planned" and self._dry_run:
+                return
+        if (getattr(t, "progress", 0) or 0) < 0.999:
             return
         try:
-            tasks = self._cd2("GetCopyTasks").get("copyTasks", [])
+            files = client.torrents_files(torrent_hash=h)
+        except Exception as e:  # noqa: BLE001
+            self._schedule_retry(state, h, name, f"读取文件列表失败: {e}")
+            self.save_data("state_v2", state)
+            return
+        picked, code, ignored = self._select_video(files)
+        if code == "no_files":
+            attempts = int((state.get(h) or {}).get("attempts") or 0) + 1
+            if attempts > 10:
+                state[h] = {"status": "review", "name": name, "reason": "文件未就绪超时（10 次）",
+                            "attempts": attempts, "ts": time.time()}
+                logger.info(f"刷流直传：REJECT {name} → 文件未就绪超时")
+            else:
+                state[h] = {"status": "waiting", "name": name, "attempts": attempts, "ts": time.time()}
+                logger.info(f"刷流直传：文件未就绪，等待（第{attempts}次） {name}")
+            self.save_data("state_v2", state)
+            return
+        if code == "disc":
+            state[h] = {"status": "review", "name": name, "reason": "蓝光原盘（口径：不收）", "ts": time.time()}
+            logger.info(f"刷流直传：REJECT {name} → 蓝光原盘")
+            self.save_data("state_v2", state)
+            return
+        if code == "aux_only":
+            state[h] = {"status": "review", "name": name, "reason": "仅样片/花絮，无正片", "ts": time.time()}
+            self.save_data("state_v2", state)
+            return
+        if code == "tv":
+            state[h] = {"status": "review", "name": name, "reason": "剧集（口径：不收剧集）", "ts": time.time()}
+            logger.info(f"刷流直传：REJECT {name} → 剧集")
+            self.save_data("state_v2", state)
+            return
+        if code == "multi":
+            state[h] = {"status": "review", "name": name,
+                        "reason": f"视频文件数={ignored}（疑似剧集/合集）", "ts": time.time()}
+            self.save_data("state_v2", state)
+            return
+        video = {"name": picked.name, "size": picked.size}
+        meta = self._parse_release(video["name"])
+        if meta["is_tv"]:
+            state[h] = {"status": "review", "name": name, "reason": "剧集（口径：不收剧集）",
+                        "meta": meta, "ts": time.time()}
+            self.save_data("state_v2", state)
+            return
+        tmdb = self._tmdb_search(meta["cn"] or meta["title"], meta["year"], meta["is_tv"])
+        if not tmdb:
+            if getattr(self, "_tmdb_transient", False):
+                self._schedule_retry(state, h, name, "TMDB 查询失败（网络/接口）")
+            else:
+                state[h] = {"status": "review", "name": name, "reason": "TMDB 未识别",
+                            "meta": meta, "ts": time.time()}
+                logger.info(f"刷流直传：TMDB 未识别 {meta['title']} {meta['year']}")
+            self.save_data("state_v2", state)
+            return
+        genre_ok, genre_reason, genre_detail = self._genre_check(tmdb, meta["is_tv"])
+        if not genre_ok:
+            if "获取失败" in genre_reason:
+                self._schedule_retry(state, h, name, genre_reason)
+            else:
+                state[h] = {"status": "review", "name": name, "reason": genre_reason,
+                            "meta": meta, "tmdb": tmdb.get("id"),
+                            "genres": [g.get("name") for g in ((genre_detail or {}).get("genres") or []) if isinstance(g, dict)],
+                            "ts": time.time()}
+                logger.info(f"刷流直传：REJECT {name} → {genre_reason}")
+            self.save_data("state_v2", state)
+            return
+        imdb_bad, imdb_reason, imdb_kind = self._imdb_adult_check(tmdb)
+        if imdb_bad:
+            state[h] = {"status": "review", "name": name, "reason": imdb_reason,
+                        "meta": meta, "tmdb": tmdb.get("id"), "ts": time.time()}
+            logger.info(f"刷流直传：REJECT {name} → {imdb_reason}")
+            self.save_data("state_v2", state)
+            return
+        if imdb_kind in ("not_ready", "error"):
+            self._schedule_retry(state, h, name, imdb_reason)
+            self.save_data("state_v2", state)
+            return
+        # TMDB 匹配校验：实际时长 vs TMDB runtime（电影）
+        tmdb_runtime = (genre_detail or {}).get("runtime")
+        duration = self._media_duration(video)
+        if tmdb_runtime and duration:
+            diff_min = abs(duration / 60.0 - float(tmdb_runtime))
+            if diff_min > 5:
+                state[h] = {"status": "review", "name": name,
+                            "reason": f"TMDB 匹配存疑（时长 {duration/60:.0f} 分钟 vs {tmdb_runtime} 分钟）",
+                            "meta": meta, "tmdb": tmdb.get("id"), "ts": time.time()}
+                logger.info(f"刷流直传：REJECT {name} → TMDB 匹配存疑（时长）")
+                self.save_data("state_v2", state)
+                return
+        chs_meta = {"tmdb_lang": tmdb.get("original_language"),
+                    "tmdb_title": tmdb.get("title") or tmdb.get("name")}
+        chs_ok, chs_reason = (True, "未检查") if not self._require_chs else self._has_chs(video, files, chs_meta)
+        if self._require_chs and not chs_ok and "执行失败" in chs_reason:
+            self._schedule_retry(state, h, name, f"中字检测失败: {chs_reason}")
+            self.save_data("state_v2", state)
+            return
+        audio_ok, audio_reason = self._audio_check(video)
+        if not audio_ok:
+            if "检测失败" in audio_reason or "未发现音频流" in audio_reason:
+                self._schedule_retry(state, h, name, audio_reason)
+            else:
+                state[h] = {"status": "review", "name": name, "reason": audio_reason,
+                            "meta": meta, "tmdb": tmdb.get("id"), "ts": time.time()}
+                logger.info(f"刷流直传：REJECT {name} → {audio_reason}")
+            self.save_data("state_v2", state)
+            return
+        ok, reason = self._judge(meta, video, chs_ok, chs_reason)
+        if not ok:
+            state[h] = {"status": "review", "name": name, "reason": reason, "meta": meta, "ts": time.time()}
+            logger.info(f"刷流直传：REJECT {name} → {reason}")
+            self.save_data("state_v2", state)
+            return
+        year, folder, fname = self._build_names(meta, tmdb, video)
+        src = f"{self._src_prefix}/{video['name'].lstrip('/')}"
+        dst_dir = f"{self._dest_root}/{folder}"
+        rec = {"status": "copying" if not self._dry_run else "planned",
+               "name": name, "title": tmdb.get("title") or tmdb.get("name"),
+               "year": year, "tmdb": tmdb.get("id"), "src": src, "dst_dir": dst_dir,
+               "orig_name": os.path.basename(video["name"]), "target_name": fname,
+               "size": video["size"], "audio": audio_reason, "ts": time.time()}
+        if self._dry_run:
+            logger.info(f"刷流直传：PLAN {src} → {dst_dir}/{fname}")
+            state[h] = rec
+            self.save_data("state_v2", state)
+            return
+        # 去重：目标已存在（校验大小）→ done；目标目录有残留原名文件 → 进入复制检查/重命名
+        try:
+            found_t = self._cd2_find(dst_dir, f"{dst_dir}/{fname}")
+        except Exception as e:  # noqa: BLE001
+            self._schedule_retry(state, h, name, f"CD2 去重查询失败: {e}")
+            self.save_data("state_v2", state)
+            return
+        if found_t:
+            fsize = self._size_of(found_t)
+            if rec["size"] and fsize and int(rec["size"]) != fsize:
+                self._schedule_retry(state, h, name, f"目标已存在但大小不一致（{fsize} vs {int(rec['size'])}）")
+                self.save_data("state_v2", state)
+                return
+            rec["status"] = "done"
+            rec["finished"] = time.time()
+            state[h] = rec
+            logger.info(f"刷流直传：目标已存在，跳过 {dst_dir}/{fname}")
+            self.save_data("state_v2", state)
+            return
+        try:
+            found_o = self._cd2_find(dst_dir, f"{dst_dir}/{rec['orig_name']}")
+        except Exception as e:  # noqa: BLE001
+            self._schedule_retry(state, h, name, f"CD2 查询残留文件失败: {e}")
+            self.save_data("state_v2", state)
+            return
+        if found_o:
+            rec["copy_started"] = time.time()
+            state[h] = rec
+            logger.info(f"刷流直传：发现残留原文件，进入重命名流程 {dst_dir}/{rec['orig_name']}")
+            self.save_data("state_v2", state)
+            return
+        try:
+            self._cd2_checked("CreateFolder", {"parentPath": self._dest_root, "folderName": folder})
+        except Exception as e:  # noqa: BLE001
+            self._schedule_retry(state, h, name, f"建目录失败: {e}")
+            self.save_data("state_v2", state)
+            return
+        existing = self._copy_task_of(src, dst_dir)
+        if existing and existing.get("status") != "Failed":
+            rec["copy_started"] = time.time()
+            state[h] = rec
+            logger.info(f"刷流直传：已存在复制任务（{existing.get('status')}），等待完成")
+            self.save_data("state_v2", state)
+            return
+        rec["copy_started"] = time.time()
+        state[h] = rec
+        self.save_data("state_v2", state)  # 先落盘，避免 CopyFile 后崩溃导致重复
+        try:
+            self._cd2_checked("CopyFile", {"theFilePaths": [src], "destPath": dst_dir,
+                                           "conflictPolicy": "Rename"}, timeout=120)
+            logger.info(f"刷流直传：COPY {src} → {dst_dir}/{fname}")
+        except Exception as e:  # noqa: BLE001
+            self._schedule_retry(state, h, name, f"复制失败: {e}")
+        self.save_data("state_v2", state)
+
+    def _check_copying(self, rec: dict):
+        """返回 (result, reason)；result: done / copying / error。"""
+        folder = rec["dst_dir"]
+        target_name = rec["target_name"]
+        try:
+            found_t = self._cd2_find(folder, f"{folder}/{target_name}")
         except Exception:
-            tasks = []
-        for task in tasks:
-            if task.get("sourcePath") == rec["src"] and task.get("destPath") == folder:
-                if task.get("status") == "Failed":
-                    rec["status"] = "error"
-                    rec["error"] = task.get("errors")
-                    logger.warning(f"刷流直传：复制任务失败 {rec['name']}")
-                break
+            return "copying", "CD2 查询失败，稍后重试"
+        if found_t:
+            fsize = self._size_of(found_t)
+            rec_size = int(rec.get("size") or 0)
+            if rec_size and fsize and fsize != rec_size:
+                return "error", f"目标文件大小不一致（{fsize} vs {rec_size}）"
+            rec["status"] = "done"
+            rec["finished"] = time.time()
+            logger.info(f"刷流直传：DONE {folder}/{target_name}")
+            return "done", "已上传"
+        orig = f"{folder}/{rec['orig_name']}"
+        try:
+            found_o = self._cd2_find(folder, orig)
+        except Exception:
+            return "copying", "CD2 查询失败，稍后重试"
+        if found_o:
+            if os.path.basename(found_o.get("fullPathName", "")) != target_name:
+                try:
+                    self._cd2_checked("RenameFile", {"theFilePath": found_o["fullPathName"],
+                                                     "newName": target_name})
+                    logger.info(f"刷流直传：RENAME → {target_name}")
+                except Exception as e:  # noqa: BLE001
+                    return "copying", f"重命名失败，稍后重试: {e}"
+            rec["status"] = "done"
+            rec["finished"] = time.time()
+            logger.info(f"刷流直传：DONE {folder}/{target_name}")
+            return "done", "已上传"
+        task = self._copy_task_of(rec["src"], folder)
+        if task:
+            status = str(task.get("status") or "")
+            if status == "Failed":
+                return "error", f"复制任务失败: {task.get('errors') or '未知'}"
+            if status == "Completed":
+                try:
+                    up = int(task.get("uploadedBytes") or 0)
+                    total = int(task.get("totalBytes") or 0)
+                    failed = int(task.get("failedFiles") or 0)
+                except Exception:
+                    up = total = failed = 0
+                if failed or (total and up != total):
+                    return "error", f"复制任务字节不一致（{up}/{total}，failed={failed}）"
+                return "copying", "复制任务已完成，等待目标文件出现"
+        return "copying", "复制中"
