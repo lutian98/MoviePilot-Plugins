@@ -20,6 +20,8 @@ import os
 import re
 import shutil
 import subprocess
+import gzip
+import threading
 import tarfile
 import time
 from pathlib import Path
@@ -34,6 +36,8 @@ from app.sdk.services import DownloaderHelper
 
 VIDEO_EXT = {".mkv", ".mp4", ".avi", ".ts", ".mov", ".wmv", ".flv", ".webm"}
 BAD_GENRE_IDS = {27: "恐怖", 53: "惊悚"}
+IMDB_DATASET_URL = "https://datasets.imdbws.com/title.basics.tsv.gz"
+IMDB_MAX_AGE_DAYS = 7
 AUDIO_BAD = re.compile(r"(?i)5\.1")
 AUX_RE = re.compile(r"(?i)(sample|trailer|featurette|behind[ ._-]?the[ ._-]?scenes|extras?|bonus|teaser|花絮|预告|样片)")
 EP_RE = re.compile(r"(?i)S\d{2,3}(E\d{1,3})?")
@@ -56,7 +60,7 @@ class Brush2Pan(_PluginBase):
     plugin_name = "刷流直传 115"
     plugin_desc = "刷流完成的影片按口径筛选后，经 CD2 直传 115 固定目录并按 TMDB 重命名"
     plugin_icon = "brush2pan.png"
-    plugin_version = "0.3.1"
+    plugin_version = "0.3.2"
     plugin_author = "lutian98"
     author_url = ""
     plugin_config_prefix = "brush2pan_"
@@ -90,6 +94,12 @@ class Brush2Pan(_PluginBase):
         self._save_prefix = str(cfg.get("save_path") or "/downloads/刷流").rstrip("/")
         try:
             self._min_size_mb = int(cfg.get("min_size_mb") or 300)
+            self._imdb_adult_check = bool(cfg.get("imdb_adult_check", True))
+            if self._imdb_adult_check:
+                try:
+                    self._imdb_ensure(background=True)
+                except Exception:
+                    pass
         except Exception:
             self._min_size_mb = 300
         self._tmdb_key = str(cfg.get("tmdb_key") or getattr(settings, "TMDB_API_KEY", "") or "")
@@ -122,6 +132,24 @@ class Brush2Pan(_PluginBase):
             "summary": "刷流种子状态",
             "description": "返回每个刷流种子的状态与拒绝原因",
         }, {
+            "path": "/imdbstatus",
+            "endpoint": self.api_imdbstatus,
+            "methods": ["GET"],
+            "summary": "IMDb 成人过滤状态",
+            "description": "返回 IMDb 数据集/索引状态，可配合 /imdbupdate 触发更新",
+        }, {
+            "path": "/imdbupdate",
+            "endpoint": self.api_imdbupdate,
+            "methods": ["GET"],
+            "summary": "更新 IMDb 数据集",
+            "description": "后台下载 title.basics 并重建 Adult 索引（约 221MB）",
+        }, {
+            "path": "/imdbcheck",
+            "endpoint": self.api_imdbcheck,
+            "methods": ["GET"],
+            "summary": "IMDb 成人检测",
+            "description": "传入 tconst（tt...），返回是否 Adult",
+        }, {
             "path": "/audiocheck",
             "endpoint": self.api_audiocheck,
             "methods": ["GET"],
@@ -140,6 +168,22 @@ class Brush2Pan(_PluginBase):
             "summary": "CD2 连通性自检",
             "description": "检查 grpcurl/协议/Token 是否可用，返回 CD2 挂载点，不复制任何文件",
         }]
+
+    def api_imdbstatus(self):
+        st = self._imdb_status()
+        st["enabled"] = bool(getattr(self, "_imdb_adult_check", True))
+        return st
+
+    def api_imdbupdate(self, force: int = 1):
+        started = self._imdb_ensure(force=bool(int(force or 0)), background=True)
+        return {"started": started, "status": self._imdb_status()}
+
+    def api_imdbcheck(self, imdb: str = ""):
+        if not imdb.startswith("tt"):
+            return {"ok": False, "error": "imdb 需为 tt 开头的 tconst"}
+        bad = self._imdb_adult(imdb)
+        return {"imdb": imdb, "index_ready": bad is not None, "adult": bad,
+                "reason": "索引未就绪" if bad is None else ("色情（IMDb Adult）" if bad else "非成人")}
 
     def api_audiocheck(self, name: str = ""):
         if not name or ".." in name:
@@ -175,6 +219,14 @@ class Brush2Pan(_PluginBase):
                                    "title": tmdb.get("title") or tmdb.get("name"),
                                    "date": tmdb.get("release_date") or tmdb.get("first_air_date")}}
         if tmdb:
+            try:
+                r = requests.get(f"https://api.themoviedb.org/3/movie/{tmdb.get('id')}/external_ids",
+                                 params={"api_key": self._tmdb_key}, timeout=20, proxies=self._proxies())
+                out["imdb_id"] = (r.json() or {}).get("imdb_id") if r.status_code == 200 else None
+            except Exception:
+                out["imdb_id"] = None
+            if out.get("imdb_id"):
+                out["imdb_adult"] = self._imdb_adult(out["imdb_id"])
             gok, greason, gdetail = self._genre_check(tmdb, meta["is_tv"])
             out["genre_ok"] = gok
             out["genre_reason"] = greason
@@ -360,6 +412,11 @@ class Brush2Pan(_PluginBase):
                                 "persistent-hint": True}}]},
                         {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [
                             {"component": "VSwitch", "props": {
+                                "model": "imdb_adult_check", "label": "IMDb 成人过滤",
+                                "hint": "用 IMDb 数据集 Adult 类型/成人标记判断色情片，首次启用需下载约 221MB 数据集。",
+                                "persistent-hint": True}}]},
+                        {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [
+                            {"component": "VSwitch", "props": {
                                 "model": "require_chs", "label": "必须含中字",
                                 "hint": "检查外挂字幕文件 / 内嵌字幕流 / 文件名标注；未发现中字则拒绝。",
                                 "persistent-hint": True}}]},
@@ -413,6 +470,7 @@ class Brush2Pan(_PluginBase):
             "dest_root": "/115/媒体/影片",
             "save_path": "/downloads/刷流",
             "min_size_mb": 300,
+            "imdb_adult_check": True,
             "tmdb_key": "",
         }
 
@@ -537,6 +595,126 @@ class Brush2Pan(_PluginBase):
             return r.json()
         except Exception:
             return None
+
+    # ---------- IMDb 成人（色情）过滤 ----------
+    def _imdb_dir(self):
+        return self.get_data_path() / "imdb"
+
+    def _imdb_status(self) -> dict:
+        d = self._imdb_dir()
+        meta = {}
+        try:
+            meta = json.loads((d / "meta.json").read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        ds = d / "title.basics.tsv.gz"
+        worker = getattr(self, "_imdb_worker", None)
+        return {"dir": str(d), "dataset": ds.exists(),
+                "dataset_mb": round(ds.stat().st_size / 1024 / 1024, 1) if ds.exists() else 0,
+                "index": (d / "adult.tsv").exists(), "updated": meta.get("updated"),
+                "count": meta.get("count"), "titles": meta.get("titles"),
+                "updating": bool(worker and worker.is_alive())}
+
+    def _imdb_ensure(self, force: bool = False, background: bool = True) -> bool:
+        st = self._imdb_status()
+        age = time.time() - float(st["updated"]) if st.get("updated") else 1e12
+        need = force or (not st["index"]) or age > IMDB_MAX_AGE_DAYS * 86400
+        if not need or st["updating"]:
+            return False
+        if background:
+            def job():
+                try:
+                    self._imdb_update()
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"刷流直传：IMDb 数据集更新失败 {e}")
+            t = threading.Thread(target=job, daemon=True)
+            self._imdb_worker = t
+            t.start()
+            logger.info("刷流直传：IMDb 数据集更新已在后台启动")
+            return True
+        self._imdb_update()
+        return True
+
+    def _imdb_update(self) -> None:
+        d = self._imdb_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        ds = d / "title.basics.tsv.gz"
+        tmp = d / "title.basics.tsv.part"
+        logger.info("刷流直传：开始下载 IMDb 数据集（约 221MB）")
+        with requests.get(IMDB_DATASET_URL, stream=True, timeout=(20, 180), proxies=self._proxies()) as r:
+            r.raise_for_status()
+            total = int(r.headers.get("Content-Length") or 0)
+            got = 0
+            mark = 0
+            with open(tmp, "wb") as f:
+                for chunk in r.iter_content(1024 * 1024):
+                    if not chunk:
+                        continue
+                    f.write(chunk)
+                    got += len(chunk)
+                    if got - mark >= 30 * 1024 * 1024:
+                        mark = got
+                        logger.info(f"刷流直传：IMDb 数据集 {got/1024/1024:.0f}/{total/1024/1024:.0f}MB")
+        tmp.replace(ds)
+        logger.info("刷流直传：IMDb 数据集下载完成，构建 Adult 索引")
+        adult = set()
+        n = 0
+        with gzip.open(ds, "rt", encoding="utf-8", errors="ignore") as f:
+            f.readline()
+            for line in f:
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) < 9:
+                    continue
+                n += 1
+                if parts[4] == "1" or "Adult" in parts[8].split(","):
+                    adult.add(parts[0])
+        with open(d / "adult.tsv", "w", encoding="utf-8") as f:
+            f.write("\n".join(sorted(adult)))
+        (d / "meta.json").write_text(json.dumps(
+            {"updated": time.time(), "count": len(adult), "titles": n,
+             "dataset_bytes": ds.stat().st_size}, ensure_ascii=False), encoding="utf-8")
+        self._imdb_adult_cache = adult
+        logger.info(f"刷流直传：IMDb 索引完成 Adult={len(adult)} / titles={n}")
+
+    def _imdb_set(self):
+        if not self._imdb_status()["index"]:
+            return None
+        cached = getattr(self, "_imdb_adult_cache", None)
+        if cached is None:
+            try:
+                cached = set((self._imdb_dir() / "adult.tsv").read_text(encoding="utf-8").split())
+            except Exception:
+                return None
+            self._imdb_adult_cache = cached
+        return cached
+
+    def _imdb_adult(self, imdb_id):
+        if not imdb_id:
+            return None
+        st = self._imdb_set()
+        return None if st is None else (imdb_id in st)
+
+    def _imdb_adult_check(self, tmdb: dict):
+        """用 IMDb 数据集的 Adult 类型/isAdult 标记判断色情片。
+        返回 (reject: Optional[bool], reason)；索引未就绪时 return (None, ...) 不阻断。"""
+        if not getattr(self, "_imdb_adult_check", True):
+            return None, "IMDb 过滤未启用"
+        imdb_id = None
+        try:
+            r = requests.get(f"https://api.themoviedb.org/3/movie/{tmdb.get('id')}/external_ids",
+                             params={"api_key": self._tmdb_key}, timeout=20, proxies=self._proxies())
+            if r.status_code == 200:
+                imdb_id = (r.json() or {}).get("imdb_id")
+        except Exception:
+            pass
+        if not imdb_id:
+            return None, "无 IMDb ID"
+        st = self._imdb_status()
+        if not st["index"]:
+            self._imdb_ensure(background=True)
+            return None, "IMDb 索引未就绪（后台构建中）"
+        bad = imdb_id in (self._imdb_set() or set())
+        return (True, f"色情（IMDb Adult {imdb_id}）") if bad else (False, f"IMDb {imdb_id} 非成人")
 
     def _genre_check(self, tmdb: dict, is_tv: bool = False):
         """题材/分级口径：排除恐怖(27)、惊悚(53)；类型为空视为未知直接拒；adult=true 拒。"""
@@ -849,6 +1027,13 @@ class Brush2Pan(_PluginBase):
                             "genres": [g.get("name") for g in ((genre_detail or {}).get("genres") or []) if isinstance(g, dict)],
                             "ts": time.time()}
                 logger.info(f"刷流直传：REJECT {getattr(t,'name','')} → {genre_reason}")
+                self.save_data("state_v2", state)
+                continue
+            imdb_bad, imdb_reason = self._imdb_adult_check(tmdb)
+            if imdb_bad:
+                state[h] = {"status": "review", "name": getattr(t, "name", ""),
+                            "reason": imdb_reason, "meta": meta, "tmdb": tmdb.get("id"), "ts": time.time()}
+                logger.info(f"刷流直传：REJECT {getattr(t,'name','')} → {imdb_reason}")
                 self.save_data("state_v2", state)
                 continue
             chs_meta = {"tmdb_lang": tmdb.get("original_language"),
