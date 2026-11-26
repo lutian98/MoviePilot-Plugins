@@ -52,7 +52,7 @@ class Brush2Pan(_PluginBase):
     plugin_name = "刷流直传 115"
     plugin_desc = "刷流完成的影片按口径筛选后，经 CD2 直传 115 固定目录并按 TMDB 重命名"
     plugin_icon = "brush2pan.png"
-    plugin_version = "0.1.0"
+    plugin_version = "0.1.1"
     plugin_author = "lutian98"
     author_url = "https://github.com/lutian98"
     plugin_config_prefix = "brush2pan_"
@@ -189,7 +189,9 @@ class Brush2Pan(_PluginBase):
         proxy = getattr(settings, "PROXY", None)
         if not proxy:
             return None
-        return {"http": proxy, "https": proxy}
+        if isinstance(proxy, dict):
+            return proxy
+        return {"http": str(proxy), "https": str(proxy)}
 
     def _ensure_grpcurl(self) -> Optional[str]:
         data = self._data_dir()
@@ -399,6 +401,12 @@ class Brush2Pan(_PluginBase):
                 continue
             video = {"name": vids[0].name, "size": vids[0].size}
             meta = self._parse_release(video["name"])
+            if meta["is_tv"]:
+                state[h] = {"status": "review", "name": getattr(t, "name", ""),
+                            "reason": "剧集（口径：不收剧集）", "meta": meta, "ts": time.time()}
+                logger.info(f"刷流直传：REJECT {getattr(t,'name','')} → 剧集")
+                self.save_data("state", state)
+                continue
             tmdb = self._tmdb_search(meta["cn"] or meta["title"], meta["year"], meta["is_tv"])
             if not tmdb:
                 state[h] = {"status": "review", "name": getattr(t, "name", ""), "reason": "TMDB 未识别",
