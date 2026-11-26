@@ -112,7 +112,7 @@ class Brush2Pan(_PluginBase):
     plugin_name = "刷流直传 115"
     plugin_desc = "刷流完成的影片按口径筛选后，经 CD2 直传 115 固定目录并按 TMDB 重命名"
     plugin_icon = "brush2pan.png"
-    plugin_version = "0.3.8"
+    plugin_version = "0.3.9"
     plugin_author = "lutian98"
     author_url = ""
     plugin_config_prefix = "brush2pan_"
@@ -1099,7 +1099,7 @@ class Brush2Pan(_PluginBase):
 
     def _schedule_retry(self, state: dict, h: str, name: str, reason: str) -> str:
         rec = state.get(h) or {}
-        attempts = int(rec.get("attempts") or 0) + 1
+        attempts = int(rec.get("attempts") or getattr(self, "_retry_attempts", 0) or 0) + 1
         if attempts > MAX_RETRY:
             state[h] = {"status": "review", "name": name,
                         "reason": f"重试失败：{reason}", "attempts": attempts, "ts": time.time()}
@@ -1152,6 +1152,7 @@ class Brush2Pan(_PluginBase):
         h = getattr(t, "hash", "")
         name = getattr(t, "name", "")
         rec = state.get(h)
+        self._retry_attempts = int((rec or {}).get("attempts") or 0)
         if rec and rec.get("status") == "review" and str(rec.get("reason", "")).startswith("视频文件数="):
             state.pop(h, None)
             rec = None
@@ -1301,6 +1302,7 @@ class Brush2Pan(_PluginBase):
         src = f"{self._src_prefix}/{video['name'].lstrip('/')}"
         dst_dir = f"{self._dest_root}/{folder}"
         rec = {"status": "copying" if not self._dry_run else "planned",
+               "attempts": getattr(self, "_retry_attempts", 0),
                "name": name, "title": tmdb.get("title") or tmdb.get("name"),
                "year": year, "tmdb": tmdb.get("id"), "src": src, "dst_dir": dst_dir,
                "orig_name": os.path.basename(video["name"]), "target_name": fname,
