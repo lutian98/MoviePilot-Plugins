@@ -56,7 +56,7 @@ class Brush2Pan(_PluginBase):
     plugin_name = "刷流直传 115"
     plugin_desc = "刷流完成的影片按口径筛选后，经 CD2 直传 115 固定目录并按 TMDB 重命名"
     plugin_icon = "brush2pan.png"
-    plugin_version = "0.3.0"
+    plugin_version = "0.3.1"
     plugin_author = "lutian98"
     author_url = ""
     plugin_config_prefix = "brush2pan_"
@@ -122,6 +122,12 @@ class Brush2Pan(_PluginBase):
             "summary": "刷流种子状态",
             "description": "返回每个刷流种子的状态与拒绝原因",
         }, {
+            "path": "/audiocheck",
+            "endpoint": self.api_audiocheck,
+            "methods": ["GET"],
+            "summary": "实际音轨检测",
+            "description": "传入种子内视频相对路径，用 ffprobe 读实际音频流，5.1（6 声道）拒绝",
+        }, {
             "path": "/subcheck",
             "endpoint": self.api_subcheck,
             "methods": ["GET"],
@@ -134,6 +140,12 @@ class Brush2Pan(_PluginBase):
             "summary": "CD2 连通性自检",
             "description": "检查 grpcurl/协议/Token 是否可用，返回 CD2 挂载点，不复制任何文件",
         }]
+
+    def api_audiocheck(self, name: str = ""):
+        if not name or ".." in name:
+            return {"ok": False, "error": "name 必须是种子内相对路径"}
+        ok, reason = self._audio_check({"name": name, "size": 0})
+        return {"ok": ok, "reason": reason, "path": os.path.join(self._save_prefix, name.lstrip("/"))}
 
     def api_subcheck(self, name: str = ""):
         if not name or ".." in name:
@@ -532,7 +544,7 @@ class Brush2Pan(_PluginBase):
         if detail is None:
             return False, "题材未知（TMDB 详情获取失败）", {}
         if detail.get("adult"):
-            return False, "成人内容（色情，口径：排除）", detail
+            return False, "TMDB 成人标记（疑似色情，口径：排除）", detail
         genres = detail.get("genres") or []
         ids = [g.get("id") for g in genres if isinstance(g, dict)]
         names = [g.get("name") for g in genres if isinstance(g, dict) and g.get("name")]
@@ -635,6 +647,36 @@ class Brush2Pan(_PluginBase):
         if any(st.get("codec_name") in image_codecs for st in streams):
             return False, "图形字幕（PGS）无中文标记，非中文片"
         return False, f"内嵌字幕 {len(streams)} 条，但未检出中文"
+
+    def _audio_check(self, video: dict) -> Tuple[bool, str]:
+        """读实际音频流：默认（第一条）音轨 6 声道 = 5.1 → 拒绝。与中字检测同样走 ffprobe。"""
+        name = video.get("name", "")
+        path = os.path.join(self._save_prefix, name.lstrip("/"))
+        ffprobe = shutil.which("ffprobe") or "/usr/local/bin/ffprobe"
+        try:
+            r = subprocess.run(
+                [ffprobe, "-v", "quiet", "-print_format", "json", "-show_streams",
+                 "-select_streams", "a", path],
+                capture_output=True, text=True, timeout=60)
+            if r.returncode != 0:
+                return False, f"音轨检测失败（ffprobe rc={r.returncode}）"
+            streams = json.loads(r.stdout or "{}").get("streams", [])
+        except Exception as e:  # noqa: BLE001
+            return False, f"音轨检测失败: {e}"
+        if not streams:
+            return False, "未发现音频流"
+        st = streams[0]
+        try:
+            channels = int(st.get("channels") or 0)
+        except Exception:
+            channels = 0
+        codec = st.get("codec_name") or "?"
+        tag = f"{codec} {channels}ch" if channels else codec
+        if channels == 6:
+            return False, f"实际音轨 5.1（{tag}，口径：排除）"
+        if channels == 0:
+            return False, f"音轨声道未知（{codec}）"
+        return True, f"音轨 {tag}（通过）"
 
     def _judge(self, meta: dict, video: dict, chs_ok: bool = True, chs_reason: str = "") -> Tuple[bool, str]:
         name = video.get("name", "")
@@ -812,6 +854,13 @@ class Brush2Pan(_PluginBase):
             chs_meta = {"tmdb_lang": tmdb.get("original_language"),
                         "tmdb_title": tmdb.get("title") or tmdb.get("name")}
             chs_ok, chs_reason = (True, "未检查") if not self._require_chs else self._has_chs(video, files, chs_meta)
+            audio_ok, audio_reason = self._audio_check(video)
+            if not audio_ok:
+                state[h] = {"status": "review", "name": getattr(t, "name", ""),
+                            "reason": audio_reason, "meta": meta, "tmdb": tmdb.get("id"), "ts": time.time()}
+                logger.info(f"刷流直传：REJECT {getattr(t,'name','')} → {audio_reason}")
+                self.save_data("state_v2", state)
+                continue
             ok, reason = self._judge(meta, video, chs_ok, chs_reason)
             if not ok:
                 state[h] = {"status": "review", "name": getattr(t, "name", ""), "reason": reason,
@@ -826,7 +875,7 @@ class Brush2Pan(_PluginBase):
                    "name": getattr(t, "name", ""), "title": tmdb.get("title") or tmdb.get("name"),
                    "year": year, "tmdb": tmdb.get("id"), "src": src, "dst_dir": dst_dir,
                    "orig_name": os.path.basename(video["name"]), "target_name": fname,
-                   "size": video["size"], "ts": time.time()}
+                   "size": video["size"], "audio": audio_reason, "ts": time.time()}
             if self._dry_run:
                 logger.info(f"刷流直传：PLAN {src} → {dst_dir}/{fname}")
                 state[h] = rec
