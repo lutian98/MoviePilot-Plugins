@@ -52,7 +52,7 @@ class Brush2Pan(_PluginBase):
     plugin_name = "刷流直传 115"
     plugin_desc = "刷流完成的影片按口径筛选后，经 CD2 直传 115 固定目录并按 TMDB 重命名"
     plugin_icon = "brush2pan.png"
-    plugin_version = "0.1.1"
+    plugin_version = "0.1.2"
     plugin_author = "lutian98"
     author_url = "https://github.com/lutian98"
     plugin_config_prefix = "brush2pan_"
@@ -97,7 +97,26 @@ class Brush2Pan(_PluginBase):
         return []
 
     def get_api(self) -> List[Dict[str, Any]]:
-        return []
+        return [{
+            "path": "/probe",
+            "endpoint": self.api_probe,
+            "methods": ["GET"],
+            "summary": "识别测试",
+            "description": "传入 release 文件名，返回解析/TMDB/命名结果，不复制",
+        }]
+
+    def api_probe(self, name: str = ""):
+        meta = self._parse_release(name)
+        tmdb = self._tmdb_search(meta["cn"] or meta["title"], meta["year"], meta["is_tv"])
+        out: Dict[str, Any] = {"input": name, "meta": meta,
+                               "tmdb": None if not tmdb else {
+                                   "id": tmdb.get("id"),
+                                   "title": tmdb.get("title") or tmdb.get("name"),
+                                   "date": tmdb.get("release_date") or tmdb.get("first_air_date")}}
+        if tmdb:
+            year, folder, fname = self._build_names(meta, tmdb, {"name": name})
+            out["year"], out["folder"], out["target_name"] = year, folder, fname
+        return out
 
     def get_page(self) -> Optional[List[dict]]:
         return []
@@ -365,7 +384,7 @@ class Brush2Pan(_PluginBase):
         if not client:
             logger.warning("刷流直传：没有可用的 qbittorrent 下载器")
             return
-        state: dict = self.get_data("state") or {}
+        state: dict = self.get_data("state_v2") or {}
         try:
             torrents = client.torrents_info()
         except Exception as e:  # noqa: BLE001
@@ -381,7 +400,7 @@ class Brush2Pan(_PluginBase):
                 continue
             if rec and rec.get("status") == "copying":
                 self._check_copying(rec)
-                self.save_data("state", state)
+                self.save_data("state_v2", state)
                 continue
             if (getattr(t, "progress", 0) or 0) < 0.999:
                 continue
@@ -397,7 +416,7 @@ class Brush2Pan(_PluginBase):
                 state[h] = {"status": "review", "name": getattr(t, "name", ""),
                             "reason": f"视频文件数={len(vids)}", "ts": time.time()}
                 logger.info(f"刷流直传：跳过 {getattr(t,'name','')}（视频文件数={len(vids)}）")
-                self.save_data("state", state)
+                self.save_data("state_v2", state)
                 continue
             video = {"name": vids[0].name, "size": vids[0].size}
             meta = self._parse_release(video["name"])
@@ -405,21 +424,21 @@ class Brush2Pan(_PluginBase):
                 state[h] = {"status": "review", "name": getattr(t, "name", ""),
                             "reason": "剧集（口径：不收剧集）", "meta": meta, "ts": time.time()}
                 logger.info(f"刷流直传：REJECT {getattr(t,'name','')} → 剧集")
-                self.save_data("state", state)
+                self.save_data("state_v2", state)
                 continue
             tmdb = self._tmdb_search(meta["cn"] or meta["title"], meta["year"], meta["is_tv"])
             if not tmdb:
                 state[h] = {"status": "review", "name": getattr(t, "name", ""), "reason": "TMDB 未识别",
                             "meta": meta, "ts": time.time()}
                 logger.info(f"刷流直传：TMDB 未识别 {meta['title']} {meta['year']}")
-                self.save_data("state", state)
+                self.save_data("state_v2", state)
                 continue
             ok, reason = self._judge(meta, video)
             if not ok:
                 state[h] = {"status": "review", "name": getattr(t, "name", ""), "reason": reason,
                             "meta": meta, "ts": time.time()}
                 logger.info(f"刷流直传：REJECT {getattr(t,'name','')} → {reason}")
-                self.save_data("state", state)
+                self.save_data("state_v2", state)
                 continue
             year, folder, fname = self._build_names(meta, tmdb, video)
             src = f"{self._src_prefix}/{video['name'].lstrip('/')}"
@@ -432,7 +451,7 @@ class Brush2Pan(_PluginBase):
             if self._dry_run:
                 logger.info(f"刷流直传：PLAN {src} → {dst_dir}/{fname}")
                 state[h] = rec
-                self.save_data("state", state)
+                self.save_data("state_v2", state)
                 continue
             try:
                 self._cd2("CreateFolder", {"parentPath": self._dest_root, "folderName": folder})
@@ -449,7 +468,7 @@ class Brush2Pan(_PluginBase):
                 rec["error"] = str(e)[:200]
                 state[h] = rec
                 logger.warning(f"刷流直传：复制失败 {src}: {e}")
-            self.save_data("state", state)
+            self.save_data("state_v2", state)
 
     def _check_copying(self, rec: dict) -> None:
         folder = rec["dst_dir"]
