@@ -56,6 +56,8 @@ AUX_TOKENS = {"sample", "samples", "trailer", "trailers", "featurette",
               "featurettes", "extra", "extras", "bonus", "teaser", "teasers",
               "花絮", "预告", "样片"}
 RES_TOKENS = {"2160p", "1080p", "720p", "480p", "4k"}
+STRIP_TITLE_TOKENS = {"usa", "cc", "2in1", "hybrid", "remastered", "uncut", "imax",
+                      "dubbed", "subbed", "dual", "multi", "2audios", "hc"}
 EP_TOKEN_RE = re.compile(r"(?i)^s(\d{2,3})(e\d{1,3})?$")
 YEAR_RE = re.compile(r"(?<![0-9])((?:19|20)\d{2})(?![0-9])")
 AUDIO_BAD = re.compile(r"(?i)5\.1")
@@ -110,7 +112,7 @@ class Brush2Pan(_PluginBase):
     plugin_name = "刷流直传 115"
     plugin_desc = "刷流完成的影片按口径筛选后，经 CD2 直传 115 固定目录并按 TMDB 重命名"
     plugin_icon = "brush2pan.png"
-    plugin_version = "0.3.7"
+    plugin_version = "0.3.8"
     plugin_author = "lutian98"
     author_url = ""
     plugin_config_prefix = "brush2pan_"
@@ -647,8 +649,10 @@ class Brush2Pan(_PluginBase):
                 cut_idx = i
                 break
         title_toks = toks[:cut_idx]
-        while title_toks and re.fullmatch(r"(?:19|20)\d{2}", title_toks[-1]) and int(title_toks[-1]) == (year if year is not None else -1):
-            title_toks.pop()
+        # 去掉发布属性词与与发布年相同的年份 token（年份出现在中间也能剔除，如 The Shining 1980 USA CC）
+        title_toks = [t for t in title_toks
+                      if t.lower() not in STRIP_TITLE_TOKENS
+                      and not (re.fullmatch(r"(?:19|20)\d{2}", t) and int(t) == (year if year is not None else -1))]
         if not title_toks:
             title_toks = [t for t in toks if not _is_marker_token(t) and not EP_TOKEN_RE.match(t)]
         title = " ".join(title_toks).strip(" -_")
