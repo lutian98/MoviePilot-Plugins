@@ -53,7 +53,7 @@ class Brush2Pan(_PluginBase):
     plugin_name = "刷流直传 115"
     plugin_desc = "刷流完成的影片按口径筛选后，经 CD2 直传 115 固定目录并按 TMDB 重命名"
     plugin_icon = "brush2pan.png"
-    plugin_version = "0.2.1"
+    plugin_version = "0.2.2"
     plugin_author = "lutian98"
     author_url = ""
     plugin_config_prefix = "brush2pan_"
@@ -165,26 +165,51 @@ class Brush2Pan(_PluginBase):
         done = sum(1 for r in rows if r["status"] == "done")
         review = sum(1 for r in rows if r["status"] == "review")
         other = len(rows) - done - review
+        # 只展示最近/最重要的 8 条：下载中 → 拒绝 → 完成
+        rank = {"downloading": 0, "pending": 1, "copying": 2, "review": 3, "planned": 4, "done": 5}
+        shown = sorted(rows, key=lambda r: rank.get(r["status"], 9))[:8]
         esc = lambda x: (str(x).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+        badge = {
+            "done": ("#2e7d32", "rgba(46,125,50,.15)"),
+            "review": ("#c62828", "rgba(198,40,40,.15)"),
+            "downloading": ("#1565c0", "rgba(21,101,192,.15)"),
+            "pending": ("#6a1b9a", "rgba(106,27,154,.15)"),
+        }
         trs = []
-        for r in rows:
-            color = "#2e7d32" if r["status"] == "done" else ("#c62828" if r["status"] == "review" else "#1565c0")
+        for idx, r in enumerate(shown):
+            fg, bg = badge.get(r["status"], ("#555", "rgba(128,128,128,.15)"))
             trs.append(
-                f"<tr><td style='padding:4px 8px;white-space:nowrap'>{esc(r['size'])}</td>"
-                f"<td style='padding:4px 8px;white-space:nowrap'>{esc(r['progress'])}</td>"
-                f"<td style='padding:4px 8px;color:{color};white-space:nowrap'>{esc(r['status'])}</td>"
-                f"<td style='padding:4px 8px'>{esc(r['name'])}</td>"
-                f"<td style='padding:4px 8px'>{esc(r['reason'])}</td></tr>")
+                f"<tr style='border-bottom:1px solid rgba(128,128,128,.12)'>"
+                f"<td style='padding:9px 10px;white-space:nowrap;color:#888'>{esc(r['size'])}</td>"
+                f"<td style='padding:9px 10px;white-space:nowrap;color:#888'>{esc(r['progress'])}</td>"
+                f"<td style='padding:9px 10px;white-space:nowrap'>"
+                f"<span style='display:inline-block;padding:1px 9px;border-radius:999px;font-size:12px;color:{fg};background:{bg}'>{esc(r['status'])}</span></td>"
+                f"<td style='padding:9px 10px;max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap' title='{esc(r['name'])}'>{esc(r['name'])}</td>"
+                f"<td style='padding:9px 10px;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap' title='{esc(r['reason'])}'>{esc(r['reason'])}</td></tr>")
         html = (
-            "<div style='font-size:13px;line-height:1.5'>"
-            f"<div style='margin-bottom:8px'>刷流种子 {len(rows)} 个："
-            f"done {done}，拒绝/跳过 {review}，下载中/待处理 {other}</div>"
-            "<table style='border-collapse:collapse;width:100%'>"
-            "<thead><tr style='text-align:left;border-bottom:1px solid #888'>"
-            "<th style='padding:4px 8px'>体积</th><th style='padding:4px 8px'>进度</th>"
-            "<th style='padding:4px 8px'>状态</th><th style='padding:4px 8px'>种子</th>"
-            "<th style='padding:4px 8px'>原因 / 目标</th></tr></thead>"
+            "<style>"
+            ".b2p-wrap{padding:2px 2px 84px}"
+            ".b2p-chips{display:flex;gap:8px;flex-wrap:wrap;margin:2px 0 12px}"
+            ".b2p-chip{padding:2px 10px;border-radius:999px;font-size:12px;border:1px solid rgba(128,128,128,.3)}"
+            ".b2p-scroll{max-height:380px;overflow:auto;border:1px solid rgba(128,128,128,.22);border-radius:10px}"
+            ".b2p-tbl{width:100%;border-collapse:separate;border-spacing:0;font-size:13px}"
+            ".b2p-tbl thead th{position:sticky;top:0;background:rgba(128,128,128,.10);backdrop-filter:blur(6px);"
+            "text-align:left;padding:8px 10px;font-weight:600;color:#888;border-bottom:1px solid rgba(128,128,128,.22);z-index:1}"
+            ".b2p-tbl tbody tr:hover{background:rgba(128,128,128,.08)}"
+            "</style>"
+            "<div class='b2p-wrap'>"
+            "<div class='b2p-chips'>"
+            f"<span class='b2p-chip' style='color:#2e7d32'>完成 {done}</span>"
+            f"<span class='b2p-chip' style='color:#c62828'>拒绝/跳过 {review}</span>"
+            f"<span class='b2p-chip' style='color:#1565c0'>下载中/待处理 {other}</span>"
+            f"<span class='b2p-chip' style='color:#888'>共 {len(rows)} 个种子</span>"
+            "</div>"
+            "<div class='b2p-scroll'><table class='b2p-tbl'>"
+            "<thead><tr><th>体积</th><th>进度</th><th>状态</th><th>种子</th><th>原因 / 目标</th></tr></thead>"
             "<tbody>" + "".join(trs) + "</tbody></table></div>"
+            f"<div style='margin-top:10px;font-size:12px;color:#888'>仅显示最重要的 {len(shown)} 条（共 {len(rows)} 条）；"
+            "完整列表：<code>GET /api/v1/plugin/Brush2Pan/status</code></div>"
+            "</div>"
         )
         return [{"component": "div", "html": html}]
 
