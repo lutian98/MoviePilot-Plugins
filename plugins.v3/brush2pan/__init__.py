@@ -53,7 +53,7 @@ class Brush2Pan(_PluginBase):
     plugin_name = "刷流直传 115"
     plugin_desc = "刷流完成的影片按口径筛选后，经 CD2 直传 115 固定目录并按 TMDB 重命名"
     plugin_icon = "brush2pan.png"
-    plugin_version = "0.2.3"
+    plugin_version = "0.2.4"
     plugin_author = "lutian98"
     author_url = ""
     plugin_config_prefix = "brush2pan_"
@@ -106,6 +106,12 @@ class Brush2Pan(_PluginBase):
             "methods": ["GET"],
             "summary": "识别测试",
             "description": "传入 release 文件名，返回解析/TMDB/命名结果，不复制",
+        }, {
+            "path": "/ui",
+            "endpoint": self.api_ui,
+            "methods": ["GET"],
+            "summary": "设置详情页分页",
+            "description": "设置每页条数与当前页",
         }, {
             "path": "/status",
             "endpoint": self.api_status,
@@ -162,12 +168,26 @@ class Brush2Pan(_PluginBase):
         rows = self._status_rows()
         if rows is None:
             return [{"component": "VAlert", "props": {"type": "warning", "text": "未找到可用的 qbittorrent 下载器"}}]
+        ui = self.get_data("ui") or {}
+        try:
+            size = int(ui.get("size") or 10)
+        except Exception:
+            size = 10
+        if size not in (10, 20, 50, 100):
+            size = 10
+        try:
+            page = int(ui.get("page") or 1)
+        except Exception:
+            page = 1
+        rank = {"downloading": 0, "pending": 1, "copying": 2, "review": 3, "planned": 4, "done": 5}
+        ordered = sorted(rows, key=lambda r: (rank.get(r["status"], 9), r["name"]))
+        total = len(ordered)
+        pages = max(1, (total + size - 1) // size)
+        page = min(max(1, page), pages)
+        shown = ordered[(page - 1) * size: page * size]
         done = sum(1 for r in rows if r["status"] == "done")
         review = sum(1 for r in rows if r["status"] == "review")
-        other = len(rows) - done - review
-        # 只展示最近/最重要的 8 条：下载中 → 拒绝 → 完成
-        rank = {"downloading": 0, "pending": 1, "copying": 2, "review": 3, "planned": 4, "done": 5}
-        shown = sorted(rows, key=lambda r: rank.get(r["status"], 9))[:8]
+        other = total - done - review
         esc = lambda x: (str(x).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
         badge = {
             "done": ("#2e7d32", "rgba(46,125,50,.15)"),
@@ -182,7 +202,7 @@ class Brush2Pan(_PluginBase):
                      "pending": "待处理", "copying": "复制中", "planned": "演练计划",
                      "error": "出错"}
         trs = []
-        for idx, r in enumerate(shown):
+        for r in shown:
             fg, bg = badge.get(r["status"], ("#555", "rgba(128,128,128,.15)"))
             trs.append(
                 f"<tr style='border-bottom:1px solid rgba(128,128,128,.12)'>"
@@ -194,10 +214,10 @@ class Brush2Pan(_PluginBase):
                 f"<td style='padding:9px 10px;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap' title='{esc(r['reason'])}'>{esc(r['reason'])}</td></tr>")
         html = (
             "<style>"
-            ".b2p-wrap{padding:2px 2px 84px}"
+            ".b2p-wrap{padding:2px 2px 8px}"
             ".b2p-chips{display:flex;gap:8px;flex-wrap:wrap;margin:2px 0 12px}"
             ".b2p-chip{padding:2px 10px;border-radius:999px;font-size:12px;border:1px solid rgba(128,128,128,.3)}"
-            ".b2p-scroll{max-height:380px;overflow:auto;border:1px solid rgba(128,128,128,.22);border-radius:10px}"
+            ".b2p-scroll{max-height:420px;overflow:auto;border:1px solid rgba(128,128,128,.22);border-radius:10px}"
             ".b2p-tbl{width:100%;border-collapse:separate;border-spacing:0;font-size:13px}"
             ".b2p-tbl thead th{position:sticky;top:0;background:rgba(128,128,128,.10);backdrop-filter:blur(6px);"
             "text-align:left;padding:8px 10px;font-weight:600;color:#888;border-bottom:1px solid rgba(128,128,128,.22);z-index:1}"
@@ -205,19 +225,41 @@ class Brush2Pan(_PluginBase):
             "</style>"
             "<div class='b2p-wrap'>"
             "<div class='b2p-chips'>"
-            f"<span class='b2p-chip' style='color:#2e7d32'>完成 {done}</span>"
+            f"<span class='b2p-chip' style='color:#2e7d32'>已上传 {done}</span>"
             f"<span class='b2p-chip' style='color:#c62828'>拒绝/跳过 {review}</span>"
             f"<span class='b2p-chip' style='color:#1565c0'>下载中/待处理 {other}</span>"
-            f"<span class='b2p-chip' style='color:#888'>共 {len(rows)} 个种子</span>"
+            f"<span class='b2p-chip' style='color:#888'>共 {total} 个种子</span>"
+            f"<span class='b2p-chip' style='color:#888'>第 {page}/{pages} 页 · 每页 {size} 条</span>"
             "</div>"
             "<div class='b2p-scroll'><table class='b2p-tbl'>"
             "<thead><tr><th>体积</th><th>进度</th><th>状态</th><th>种子</th><th>原因 / 目标</th></tr></thead>"
             "<tbody>" + "".join(trs) + "</tbody></table></div>"
-            f"<div style='margin-top:10px;font-size:12px;color:#888'>仅显示最重要的 {len(shown)} 条（共 {len(rows)} 条）；"
-            "完整列表：<code>GET /api/v1/plugin/Brush2Pan/status</code></div>"
             "</div>"
         )
-        return [{"component": "div", "html": html}]
+        def btn(text, target_page, target_size, disabled=False, variant="tonal"):
+            return {"component": "VBtn",
+                    "props": {"size": "small", "variant": variant, "class": "mr-1 mb-1",
+                              "disabled": bool(disabled)},
+                    "text": text,
+                    "events": {"click": {"api": "/api/v1/plugin/Brush2Pan/ui", "method": "GET",
+                                         "params": {"page": target_page, "size": target_size}}}}
+        controls = []
+        controls.append({"component": "VCol", "props": {"cols": "auto"}, "content": [
+            btn("上一页", page - 1, size, disabled=(page <= 1))]})
+        controls.append({"component": "VCol", "props": {"cols": "auto"}, "content": [
+            {"component": "div", "props": {"class": "text-body-2 px-2 pt-1"},
+             "text": f"第 {page} / {pages} 页"}]})
+        controls.append({"component": "VCol", "props": {"cols": "auto"}, "content": [
+            btn("下一页", page + 1, size, disabled=(page >= pages))]})
+        controls.append({"component": "VCol", "props": {"cols": "auto"}, "content": [
+            {"component": "div", "props": {"class": "text-body-2 px-2 pt-1"}, "text": "每页："}]})
+        for sz in (10, 20, 50, 100):
+            controls.append({"component": "VCol", "props": {"cols": "auto"}, "content": [
+                btn(f"{sz} 条", 1, sz, disabled=(sz == size), variant="text")]})
+        return [
+            {"component": "div", "html": html},
+            {"component": "VRow", "props": {"class": "mt-1", "align": "center"}, "content": controls},
+        ]
 
     def _status_rows(self):
         client = self._qb_client()
@@ -259,6 +301,20 @@ class Brush2Pan(_PluginBase):
             })
         rows.sort(key=lambda r: r["name"])
         return rows
+
+    def api_ui(self, page: int = 1, size: int = 10):
+        try:
+            size = int(size)
+        except Exception:
+            size = 10
+        if size not in (10, 20, 50, 100):
+            size = 10
+        try:
+            page = max(1, int(page))
+        except Exception:
+            page = 1
+        self.save_data("ui", {"page": page, "size": size})
+        return {"ok": True, "page": page, "size": size}
 
     def api_status(self):
         rows = self._status_rows()
