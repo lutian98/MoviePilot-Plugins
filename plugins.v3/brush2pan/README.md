@@ -12,9 +12,10 @@ MoviePilot 插件：刷流下载完成的影片 → 识别/筛选 → 经 CD2 �
    - 不收蓝光原盘（BDMV / m2ts / ISO）
    - 只排除 5.1 声道（7.1 / Atmos / TrueHD 等不再排除）
    - 默认最小 300MB
-4. 通过 CD2 gRPC `CreateFolder` → `CopyFile` 上传（CD2 服务端直接读取本地文件并写入 115，插件不搬运文件）
-5. 复制完成后 `RenameFile` 为 `片名 (年份) - 1080p.mkv`
-6. 状态保存在插件数据目录
+4. 自动忽略样片/花絮（sample/trailer/featurette 等），取正片；多集/多碟仍拒绝
+5. 通过 CD2 gRPC `CreateFolder` → `CopyFile` 上传（CD2 服务端直接读取本地文件并写入 115，插件不搬运文件）
+6. 复制完成后 `RenameFile` 为 `片名 (年份) - 1080p.mkv`
+7. 状态保存在插件数据目录
 
 ## 配置
 
