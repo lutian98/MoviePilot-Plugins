@@ -52,20 +52,20 @@ class Brush2Pan(_PluginBase):
     plugin_name = "刷流直传 115"
     plugin_desc = "刷流完成的影片按口径筛选后，经 CD2 直传 115 固定目录并按 TMDB 重命名"
     plugin_icon = "brush2pan.png"
-    plugin_version = "0.1.2"
+    plugin_version = "0.1.3"
     plugin_author = "lutian98"
-    author_url = "https://github.com/lutian98"
+    author_url = ""
     plugin_config_prefix = "brush2pan_"
     plugin_order = 90
     auth_level = 1
 
     _enabled: bool = False
     _dry_run: bool = True
-    _cd2_grpc: str = "172.17.0.1:19798"
+    _cd2_grpc: str = ""
     _cd2_token: str = ""
-    _dest_root: str = "/115/浅深资料/影片"
-    _src_prefix: str = "/Unraid/Media/PT/刷流"
-    _save_prefix: str = "/downloads/PT/刷流"
+    _dest_root: str = ""
+    _src_prefix: str = ""
+    _save_prefix: str = "/downloads"
     _min_size_mb: int = 300
     _tmdb_key: str = ""
 
@@ -78,11 +78,11 @@ class Brush2Pan(_PluginBase):
         cfg = config or self.get_config() or {}
         self._enabled = bool(cfg.get("enabled", False))
         self._dry_run = bool(cfg.get("dry_run", True))
-        self._cd2_grpc = str(cfg.get("cd2_grpc") or "172.17.0.1:19798")
+        self._cd2_grpc = str(cfg.get("cd2_grpc") or "")
         self._cd2_token = str(cfg.get("cd2_token") or "")
-        self._dest_root = str(cfg.get("dest_root") or "/115/浅深资料/影片").rstrip("/")
-        self._src_prefix = str(cfg.get("src_prefix") or "/Unraid/Media/PT/刷流").rstrip("/")
-        self._save_prefix = str(cfg.get("save_path") or "/downloads/PT/刷流").rstrip("/")
+        self._dest_root = str(cfg.get("dest_root") or "/115/媒体/影片").rstrip("/")
+        self._src_prefix = str(cfg.get("src_prefix") or "/Unraid/Media/刷流").rstrip("/")
+        self._save_prefix = str(cfg.get("save_path") or "/downloads/刷流").rstrip("/")
         try:
             self._min_size_mb = int(cfg.get("min_size_mb") or 300)
         except Exception:
@@ -151,7 +151,7 @@ class Brush2Pan(_PluginBase):
                         {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
                             {"component": "VTextField", "props": {
                                 "model": "cd2_grpc", "label": "CD2 gRPC 地址",
-                                "placeholder": "172.17.0.1:19798"}}]},
+                                "placeholder": "cd2:19798"}}]},
                         {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
                             {"component": "VTextField", "props": {
                                 "model": "cd2_token", "label": "CD2 API Token",
@@ -162,17 +162,17 @@ class Brush2Pan(_PluginBase):
                         {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
                             {"component": "VTextField", "props": {
                                 "model": "src_prefix", "label": "本地源路径（CD2 视角）",
-                                "placeholder": "/Unraid/Media/PT/刷流"}}]},
+                                "placeholder": "/Unraid/Media/刷流"}}]},
                         {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
                             {"component": "VTextField", "props": {
                                 "model": "dest_root", "label": "115 目标目录",
-                                "placeholder": "/115/浅深资料/影片"}}]},
+                                "placeholder": "/115/媒体/影片"}}]},
                     ]},
                     {"component": "VRow", "content": [
                         {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
                             {"component": "VTextField", "props": {
                                 "model": "save_path", "label": "QB 保存路径过滤",
-                                "placeholder": "/downloads/PT/刷流"}}]},
+                                "placeholder": "/downloads/刷流"}}]},
                         {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
                             {"component": "VTextField", "props": {
                                 "model": "min_size_mb", "label": "最小体积（MB）",
@@ -189,11 +189,11 @@ class Brush2Pan(_PluginBase):
         ], {
             "enabled": False,
             "dry_run": True,
-            "cd2_grpc": "172.17.0.1:19798",
+            "cd2_grpc": "",
             "cd2_token": "",
-            "src_prefix": "/Unraid/Media/PT/刷流",
-            "dest_root": "/115/浅深资料/影片",
-            "save_path": "/downloads/PT/刷流",
+            "src_prefix": "/Unraid/Media/刷流",
+            "dest_root": "/115/媒体/影片",
+            "save_path": "/downloads/刷流",
             "min_size_mb": 300,
             "tmdb_key": "",
         }
