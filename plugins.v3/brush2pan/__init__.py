@@ -53,7 +53,7 @@ class Brush2Pan(_PluginBase):
     plugin_name = "刷流直传 115"
     plugin_desc = "刷流完成的影片按口径筛选后，经 CD2 直传 115 固定目录并按 TMDB 重命名"
     plugin_icon = "brush2pan.png"
-    plugin_version = "0.2.2"
+    plugin_version = "0.2.3"
     plugin_author = "lutian98"
     author_url = ""
     plugin_config_prefix = "brush2pan_"
@@ -174,7 +174,13 @@ class Brush2Pan(_PluginBase):
             "review": ("#c62828", "rgba(198,40,40,.15)"),
             "downloading": ("#1565c0", "rgba(21,101,192,.15)"),
             "pending": ("#6a1b9a", "rgba(106,27,154,.15)"),
+            "copying": ("#ef6c00", "rgba(239,108,0,.15)"),
+            "planned": ("#ef6c00", "rgba(239,108,0,.15)"),
+            "error": ("#c62828", "rgba(198,40,40,.15)"),
         }
+        status_cn = {"done": "已上传", "review": "拒绝/跳过", "downloading": "下载中",
+                     "pending": "待处理", "copying": "复制中", "planned": "演练计划",
+                     "error": "出错"}
         trs = []
         for idx, r in enumerate(shown):
             fg, bg = badge.get(r["status"], ("#555", "rgba(128,128,128,.15)"))
@@ -183,7 +189,7 @@ class Brush2Pan(_PluginBase):
                 f"<td style='padding:9px 10px;white-space:nowrap;color:#888'>{esc(r['size'])}</td>"
                 f"<td style='padding:9px 10px;white-space:nowrap;color:#888'>{esc(r['progress'])}</td>"
                 f"<td style='padding:9px 10px;white-space:nowrap'>"
-                f"<span style='display:inline-block;padding:1px 9px;border-radius:999px;font-size:12px;color:{fg};background:{bg}'>{esc(r['status'])}</span></td>"
+                f"<span style='display:inline-block;padding:1px 9px;border-radius:999px;font-size:12px;color:{fg};background:{bg}'>{esc(status_cn.get(r['status'], r['status']))}</span></td>"
                 f"<td style='padding:9px 10px;max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap' title='{esc(r['name'])}'>{esc(r['name'])}</td>"
                 f"<td style='padding:9px 10px;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap' title='{esc(r['reason'])}'>{esc(r['reason'])}</td></tr>")
         html = (
@@ -242,6 +248,9 @@ class Brush2Pan(_PluginBase):
                 status = "downloading" if progress < 0.999 else "pending"
                 reason = f"下载中 {progress*100:.1f}%" if progress < 0.999 else "等待下一轮扫描"
             rows.append({
+                "status_cn": {"done": "已上传", "review": "拒绝/跳过", "downloading": "下载中",
+                              "pending": "待处理", "copying": "复制中", "planned": "演练计划",
+                              "error": "出错"}.get(status, status),
                 "name": getattr(t, "name", ""),
                 "size": f"{(getattr(t,'size',0) or 0)/2**30:.2f}GB",
                 "progress": f"{progress*100:.1f}%",
