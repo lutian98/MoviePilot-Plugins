@@ -38,15 +38,16 @@
     "name": "刷流直传 115",
     "description": "刷流完成的影片按口径筛选后，经 CD2 直传 115 固定目录并按 TMDB 重命名。",
     "labels": "刷流,115,文件整理",
-    "version": "0.1.3",
+    "version": "0.1.4",
     "icon": "brush2pan.png",
     "author": "lutian98",
     "level": 1,
     "release": true,
     "system_version": ">=3.0.0",
     "history": {
-      "v0.1.3": "去除默认配置中的个人路径与内网地址，改为占位符；README 通用化。",
-      "v0.1.2": "新增 /probe 识别测试接口；状态键改为 state_v2。",
+      "v0.1.4": "新增 /selftest（CD2 连通性自检）。",
+      "v0.1.3": "去除默认配置中的个人路径与内网地址。",
+      "v0.1.2": "新增 /probe 识别测试接口。",
       "v0.1.1": "修复 PROXY 为 dict 时 TMDB 报错；剧集提前拒绝。",
       "v0.1.0": "首个版本。"
     }
