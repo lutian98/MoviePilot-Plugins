@@ -60,7 +60,7 @@ class Brush2Pan(_PluginBase):
     plugin_name = "刷流直传 115"
     plugin_desc = "刷流完成的影片按口径筛选后，经 CD2 直传 115 固定目录并按 TMDB 重命名"
     plugin_icon = "brush2pan.png"
-    plugin_version = "0.3.5"
+    plugin_version = "0.3.6"
     plugin_author = "lutian98"
     author_url = ""
     plugin_config_prefix = "brush2pan_"
@@ -94,9 +94,9 @@ class Brush2Pan(_PluginBase):
         self._save_prefix = str(cfg.get("save_path") or "/downloads/刷流").rstrip("/")
         try:
             self._min_size_mb = int(cfg.get("min_size_mb") or 300)
-            self._imdb_adult_check = bool(cfg.get("imdb_adult_check", True))
+            self._imdb_enabled = bool(cfg.get("imdb_adult_check", True))
             self._imdb_lock = threading.Lock()
-            if self._imdb_adult_check:
+            if self._imdb_enabled:
                 try:
                     self._imdb_ensure(background=True)
                 except Exception:
@@ -172,7 +172,7 @@ class Brush2Pan(_PluginBase):
 
     def api_imdbstatus(self):
         st = self._imdb_status()
-        st["enabled"] = bool(getattr(self, "_imdb_adult_check", True))
+        st["enabled"] = bool(getattr(self, "_imdb_enabled", True))
         return st
 
     def api_imdbupdate(self, force: int = 1, rebuild: int = 0):
@@ -722,7 +722,7 @@ class Brush2Pan(_PluginBase):
     def _imdb_adult_check(self, tmdb: dict):
         """用 IMDb 数据集的 Adult 类型/isAdult 标记判断色情片。
         返回 (reject: Optional[bool], reason)；索引未就绪时 return (None, ...) 不阻断。"""
-        if not getattr(self, "_imdb_adult_check", True):
+        if not getattr(self, "_imdb_enabled", True):
             return None, "IMDb 过滤未启用"
         imdb_id = None
         try:
