@@ -112,7 +112,7 @@ class Brush2Pan(_PluginBase):
     plugin_name = "刷流直传 115"
     plugin_desc = "刷流完成的影片按口径筛选后，经 CD2 直传 115 固定目录并按 TMDB 重命名"
     plugin_icon = "brush2pan.png"
-    plugin_version = "0.3.9"
+    plugin_version = "0.3.10"
     plugin_author = "lutian98"
     author_url = ""
     plugin_config_prefix = "brush2pan_"
@@ -884,9 +884,10 @@ class Brush2Pan(_PluginBase):
             best = None
             for item in results:
                 name = item.get("title") or item.get("name") or ""
+                orig = item.get("original_title") or item.get("original_name") or ""
                 date = item.get("release_date") or item.get("first_air_date") or ""
                 ry = int(date[:4]) if date[:4].isdigit() else None
-                exact = self._norm_title(name) == want
+                exact = self._norm_title(name) == want or (orig and self._norm_title(orig) == want)
                 score = 5 if exact else 0
                 if year and ry == year:
                     score += 5
