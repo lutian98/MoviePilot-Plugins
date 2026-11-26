@@ -53,7 +53,7 @@ class Brush2Pan(_PluginBase):
     plugin_name = "刷流直传 115"
     plugin_desc = "刷流完成的影片按口径筛选后，经 CD2 直传 115 固定目录并按 TMDB 重命名"
     plugin_icon = "brush2pan.png"
-    plugin_version = "0.1.9"
+    plugin_version = "0.2.0"
     plugin_author = "lutian98"
     author_url = ""
     plugin_config_prefix = "brush2pan_"
@@ -165,30 +165,28 @@ class Brush2Pan(_PluginBase):
         done = sum(1 for r in rows if r["status"] == "done")
         review = sum(1 for r in rows if r["status"] == "review")
         other = len(rows) - done - review
-        panels = []
+        esc = lambda x: (str(x).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+        trs = []
         for r in rows:
-            panels.append({
-                "component": "VExpansionPanel",
-                "props": {"title": f"[{r['status']}] {r['name']}　{r['size']}　{r['progress']}"},
-                "content": [{
-                    "component": "div",
-                    "props": {"class": "text-caption"},
-                    "text": f"原因 / 目标：{r['reason']}",
-                }],
-            })
-        return [{
-            "component": "VCard",
-            "props": {"variant": "outlined"},
-            "content": [
-                {"component": "VCardTitle", "props": {"class": "text-h6"}, "text": "刷流种子与拒绝原因"},
-                {"component": "VDivider"},
-                {"component": "VCardText", "content": [
-                    {"component": "div", "props": {"class": "text-body-2 mb-2"},
-                     "text": f"共 {len(rows)} 个：done {done}；拒绝/跳过 {review}；下载中/待处理 {other}"},
-                    {"component": "VExpansionPanels", "content": panels},
-                ]},
-            ],
-        }]
+            color = "#2e7d32" if r["status"] == "done" else ("#c62828" if r["status"] == "review" else "#1565c0")
+            trs.append(
+                f"<tr><td style='padding:4px 8px;white-space:nowrap'>{esc(r['size'])}</td>"
+                f"<td style='padding:4px 8px;white-space:nowrap'>{esc(r['progress'])}</td>"
+                f"<td style='padding:4px 8px;color:{color};white-space:nowrap'>{esc(r['status'])}</td>"
+                f"<td style='padding:4px 8px'>{esc(r['name'])}</td>"
+                f"<td style='padding:4px 8px'>{esc(r['reason'])}</td></tr>")
+        html = (
+            "<div style='font-size:13px;line-height:1.5'>"
+            f"<div style='margin-bottom:8px'>刷流种子 {len(rows)} 个："
+            f"done {done}，拒绝/跳过 {review}，下载中/待处理 {other}</div>"
+            "<table style='border-collapse:collapse;width:100%'>"
+            "<thead><tr style='text-align:left;border-bottom:1px solid #888'>"
+            "<th style='padding:4px 8px'>体积</th><th style='padding:4px 8px'>进度</th>"
+            "<th style='padding:4px 8px'>状态</th><th style='padding:4px 8px'>种子</th>"
+            "<th style='padding:4px 8px'>原因 / 目标</th></tr></thead>"
+            "<tbody>" + "".join(trs) + "</tbody></table></div>"
+        )
+        return [{"component": "div", "html": html}]
 
     def _status_rows(self):
         client = self._qb_client()
