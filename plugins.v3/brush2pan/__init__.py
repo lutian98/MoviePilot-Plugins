@@ -33,6 +33,7 @@ from app.sdk.plugin import _PluginBase
 from app.sdk.services import DownloaderHelper
 
 VIDEO_EXT = {".mkv", ".mp4", ".avi", ".ts", ".mov", ".wmv", ".flv", ".webm"}
+BAD_GENRE_IDS = {27: "恐怖", 53: "惊悚"}
 AUDIO_BAD = re.compile(r"(?i)5\.1")
 AUX_RE = re.compile(r"(?i)(sample|trailer|featurette|behind[ ._-]?the[ ._-]?scenes|extras?|bonus|teaser|花絮|预告|样片)")
 EP_RE = re.compile(r"(?i)S\d{2,3}(E\d{1,3})?")
@@ -55,7 +56,7 @@ class Brush2Pan(_PluginBase):
     plugin_name = "刷流直传 115"
     plugin_desc = "刷流完成的影片按口径筛选后，经 CD2 直传 115 固定目录并按 TMDB 重命名"
     plugin_icon = "brush2pan.png"
-    plugin_version = "0.2.9"
+    plugin_version = "0.3.0"
     plugin_author = "lutian98"
     author_url = ""
     plugin_config_prefix = "brush2pan_"
@@ -161,6 +162,12 @@ class Brush2Pan(_PluginBase):
                                    "id": tmdb.get("id"),
                                    "title": tmdb.get("title") or tmdb.get("name"),
                                    "date": tmdb.get("release_date") or tmdb.get("first_air_date")}}
+        if tmdb:
+            gok, greason, gdetail = self._genre_check(tmdb, meta["is_tv"])
+            out["genre_ok"] = gok
+            out["genre_reason"] = greason
+            out["genres"] = [g.get("name") for g in ((gdetail or {}).get("genres") or []) if isinstance(g, dict)]
+            out["adult"] = bool((gdetail or {}).get("adult"))
         if tmdb:
             year, folder, fname = self._build_names(meta, tmdb, {"name": name})
             out["year"], out["folder"], out["target_name"] = year, folder, fname
@@ -505,6 +512,37 @@ class Brush2Pan(_PluginBase):
                 return result
         return None
 
+    def _tmdb_detail(self, tmdb_id, is_tv: bool = False) -> Optional[dict]:
+        if not self._tmdb_key or not tmdb_id:
+            return None
+        path = ("tv/" if is_tv else "movie/") + str(tmdb_id)
+        try:
+            r = requests.get("https://api.themoviedb.org/3/" + path,
+                             params={"api_key": self._tmdb_key, "language": "zh-CN"},
+                             timeout=20, proxies=self._proxies())
+            if r.status_code != 200:
+                return None
+            return r.json()
+        except Exception:
+            return None
+
+    def _genre_check(self, tmdb: dict, is_tv: bool = False):
+        """题材/分级口径：排除恐怖(27)、惊悚(53)；类型为空视为未知直接拒；adult=true 拒。"""
+        detail = self._tmdb_detail(tmdb.get("id"), is_tv)
+        if detail is None:
+            return False, "题材未知（TMDB 详情获取失败）", {}
+        if detail.get("adult"):
+            return False, "成人内容（色情，口径：排除）", detail
+        genres = detail.get("genres") or []
+        ids = [g.get("id") for g in genres if isinstance(g, dict)]
+        names = [g.get("name") for g in genres if isinstance(g, dict) and g.get("name")]
+        if not ids:
+            return False, "题材未知（TMDB 无类型，口径：排除）", detail
+        bad = [BAD_GENRE_IDS[i] for i in ids if i in BAD_GENRE_IDS]
+        if bad:
+            return False, f"题材排除（{'/'.join(bad)}）", detail
+        return True, "题材通过（" + "/".join(names) + "）", detail
+
     def _tmdb_search_one(self, title: str, year: Optional[int], is_tv: bool) -> Optional[dict]:
         path = "search/tv" if is_tv else "search/movie"
         params = {"api_key": self._tmdb_key, "query": title, "language": "zh-CN"}
@@ -616,7 +654,7 @@ class Brush2Pan(_PluginBase):
             return False, "sample"
         if self._require_chs and not chs_ok:
             return False, f"无中字（{chs_reason}）"
-        return True, "通过（中字✓；题材/分级口径待补）"
+        return True, "通过（中字✓）"
 
     @staticmethod
     def _build_names(meta: dict, tmdb: dict, video: dict) -> Tuple[int, str, str]:
@@ -760,6 +798,15 @@ class Brush2Pan(_PluginBase):
                 state[h] = {"status": "review", "name": getattr(t, "name", ""), "reason": "TMDB 未识别",
                             "meta": meta, "ts": time.time()}
                 logger.info(f"刷流直传：TMDB 未识别 {meta['title']} {meta['year']}")
+                self.save_data("state_v2", state)
+                continue
+            genre_ok, genre_reason, genre_detail = self._genre_check(tmdb, meta["is_tv"])
+            if not genre_ok:
+                state[h] = {"status": "review", "name": getattr(t, "name", ""),
+                            "reason": genre_reason, "meta": meta, "tmdb": tmdb.get("id"),
+                            "genres": [g.get("name") for g in ((genre_detail or {}).get("genres") or []) if isinstance(g, dict)],
+                            "ts": time.time()}
+                logger.info(f"刷流直传：REJECT {getattr(t,'name','')} → {genre_reason}")
                 self.save_data("state_v2", state)
                 continue
             chs_meta = {"tmdb_lang": tmdb.get("original_language"),
