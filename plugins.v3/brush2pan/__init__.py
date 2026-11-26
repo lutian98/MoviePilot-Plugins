@@ -7,7 +7,7 @@
 
 - 不上传剧集、不收蓝光原盘（BDMV/m2ts/ISO）
 - 只收 1080p / 2160p
-- 排除 5.1 / 7.1 / Atmos / TrueHD / DTS-HD 多声道
+- 排除 5.1 声道（只排 5.1，7.1/Atmos 等放行）
 - 上传由 CD2 服务端完成（读取 /Unraid 本地文件 → /115），不经过本插件搬运
 - dry_run 默认开启，只出清单不复制
 
@@ -33,7 +33,7 @@ from app.sdk.plugin import _PluginBase
 from app.sdk.services import DownloaderHelper
 
 VIDEO_EXT = {".mkv", ".mp4", ".avi", ".ts", ".mov", ".wmv", ".flv", ".webm"}
-AUDIO_BAD = re.compile(r"(?i)(5\.1|7\.1|atmos|truehd|dts[-\s]?hd|dts[-\s]?x)")
+AUDIO_BAD = re.compile(r"(?i)5\.1")
 MARKER_RE = re.compile(
     r"(?i)(?:S\d{2,3}(?:E\d{1,3})?|\b(?:19|20)\d{2}\b|2160p|1080p|720p|480p|"
     r"WEB[ -]?DL|WEBRip|BluRay|Blu-ray|HDTV|REMUX|UHD|HDR|DoVi|DV|"
@@ -53,7 +53,7 @@ class Brush2Pan(_PluginBase):
     plugin_name = "刷流直传 115"
     plugin_desc = "刷流完成的影片按口径筛选后，经 CD2 直传 115 固定目录并按 TMDB 重命名"
     plugin_icon = "brush2pan.png"
-    plugin_version = "0.2.7"
+    plugin_version = "0.2.8"
     plugin_author = "lutian98"
     author_url = ""
     plugin_config_prefix = "brush2pan_"
@@ -607,7 +607,7 @@ class Brush2Pan(_PluginBase):
         if not re.search(r"(?i)(1080p|2160p)", name):
             return False, "非 1080p/2160p"
         if AUDIO_BAD.search(name):
-            return False, "多声道 5.1/7.1/Atmos/TrueHD/DTS-HD（口径：排除）"
+            return False, "5.1 声道（口径：排除）"
         if size_mb < self._min_size_mb:
             return False, f"文件过小 {size_mb:.0f}MB < {self._min_size_mb}MB"
         if "sample" in nl:
