@@ -53,7 +53,7 @@ class Brush2Pan(_PluginBase):
     plugin_name = "刷流直传 115"
     plugin_desc = "刷流完成的影片按口径筛选后，经 CD2 直传 115 固定目录并按 TMDB 重命名"
     plugin_icon = "brush2pan.png"
-    plugin_version = "0.1.7"
+    plugin_version = "0.1.8"
     plugin_author = "lutian98"
     author_url = ""
     plugin_config_prefix = "brush2pan_"
@@ -107,6 +107,12 @@ class Brush2Pan(_PluginBase):
             "summary": "识别测试",
             "description": "传入 release 文件名，返回解析/TMDB/命名结果，不复制",
         }, {
+            "path": "/status",
+            "endpoint": self.api_status,
+            "methods": ["GET"],
+            "summary": "刷流种子状态",
+            "description": "返回每个刷流种子的状态与拒绝原因",
+        }, {
             "path": "/subcheck",
             "endpoint": self.api_subcheck,
             "methods": ["GET"],
@@ -153,7 +159,68 @@ class Brush2Pan(_PluginBase):
         return out
 
     def get_page(self) -> Optional[List[dict]]:
-        return []
+        rows = self._status_rows()
+        if rows is None:
+            return [{"component": "VAlert", "props": {"type": "warning", "text": "未找到可用的 qbittorrent 下载器"}}]
+        return [
+            {"component": "VAlert", "props": {
+                "type": "info", "variant": "tonal",
+                "text": f"刷流种子 {len(rows)} 个：done {sum(1 for r in rows if r['status']=='done')}；"
+                        f"拒绝/跳过 {sum(1 for r in rows if r['status']=='review')}；"
+                        f"其他 {sum(1 for r in rows if r['status'] not in ('done','review'))}"}},
+            {"component": "VDataTable", "props": {
+                "headers": [
+                    {"title": "种子", "key": "name"},
+                    {"title": "体积", "key": "size"},
+                    {"title": "进度", "key": "progress"},
+                    {"title": "状态", "key": "status"},
+                    {"title": "原因 / 目标", "key": "reason"},
+                ],
+                "items": rows, "density": "compact", "itemsPerPage": 50,
+            }},
+        ]
+
+    def _status_rows(self):
+        client = self._qb_client()
+        if not client:
+            return None
+        try:
+            torrents = client.torrents_info()
+        except Exception:
+            return None
+        state = self.get_data("state_v2") or {}
+        rows = []
+        for t in torrents:
+            save_path = getattr(t, "save_path", "") or ""
+            if not save_path.startswith(self._save_prefix):
+                continue
+            h = getattr(t, "hash", "")
+            rec = state.get(h) or {}
+            progress = getattr(t, "progress", 0) or 0
+            if rec.get("status") == "done":
+                status, reason = "done", rec.get("target_name") or "已上传"
+            elif rec.get("status") == "copying":
+                status, reason = "copying", "复制中"
+            elif rec.get("status") == "review":
+                status, reason = "review", rec.get("reason") or "被拒绝"
+            elif rec.get("status") == "planned":
+                status, reason = "planned", rec.get("target_name") or "演练计划"
+            else:
+                status = "downloading" if progress < 0.999 else "pending"
+                reason = f"下载中 {progress*100:.1f}%" if progress < 0.999 else "等待下一轮扫描"
+            rows.append({
+                "name": getattr(t, "name", ""),
+                "size": f"{(getattr(t,'size',0) or 0)/2**30:.2f}GB",
+                "progress": f"{progress*100:.1f}%",
+                "status": status,
+                "reason": reason,
+            })
+        rows.sort(key=lambda r: r["name"])
+        return rows
+
+    def api_status(self):
+        rows = self._status_rows()
+        return {"ok": rows is not None, "rows": rows or []}
 
     def stop_service(self) -> None:
         pass
@@ -518,6 +585,9 @@ class Brush2Pan(_PluginBase):
                 continue
             h = getattr(t, "hash", "")
             rec = state.get(h)
+            if rec and rec.get("status") == "review" and str(rec.get("reason", "")).startswith("视频文件数=0"):
+                state.pop(h, None)
+                rec = None
             if rec and rec.get("status") in ("done", "review", "error"):
                 continue
             if rec and rec.get("status") == "copying":
@@ -534,9 +604,13 @@ class Brush2Pan(_PluginBase):
             vids = [f for f in files
                     if os.path.splitext(getattr(f, "name", ""))[1].lower() in VIDEO_EXT
                     and (getattr(f, "progress", 0) or 0) >= 0.999]
-            if len(vids) != 1:
+            if len(vids) == 0:
+                # 文件列表可能尚未落盘/元数据未同步，下一轮重试，不写死 review
+                logger.info(f"刷流直传：文件未就绪，稍后重试 {getattr(t,'name','')}")
+                continue
+            if len(vids) > 1:
                 state[h] = {"status": "review", "name": getattr(t, "name", ""),
-                            "reason": f"视频文件数={len(vids)}", "ts": time.time()}
+                            "reason": f"视频文件数={len(vids)}（疑似剧集/合集）", "ts": time.time()}
                 logger.info(f"刷流直传：跳过 {getattr(t,'name','')}（视频文件数={len(vids)}）")
                 self.save_data("state_v2", state)
                 continue
