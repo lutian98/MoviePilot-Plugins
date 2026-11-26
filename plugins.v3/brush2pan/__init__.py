@@ -34,6 +34,8 @@ from app.sdk.services import DownloaderHelper
 
 VIDEO_EXT = {".mkv", ".mp4", ".avi", ".ts", ".mov", ".wmv", ".flv", ".webm"}
 AUDIO_BAD = re.compile(r"(?i)5\.1")
+AUX_RE = re.compile(r"(?i)(sample|trailer|featurette|behind[ ._-]?the[ ._-]?scenes|extras?|bonus|teaser|花絮|预告|样片)")
+EP_RE = re.compile(r"(?i)S\d{2,3}(E\d{1,3})?")
 MARKER_RE = re.compile(
     r"(?i)(?:S\d{2,3}(?:E\d{1,3})?|\b(?:19|20)\d{2}\b|2160p|1080p|720p|480p|"
     r"WEB[ -]?DL|WEBRip|BluRay|Blu-ray|HDTV|REMUX|UHD|HDR|DoVi|DV|"
@@ -53,7 +55,7 @@ class Brush2Pan(_PluginBase):
     plugin_name = "刷流直传 115"
     plugin_desc = "刷流完成的影片按口径筛选后，经 CD2 直传 115 固定目录并按 TMDB 重命名"
     plugin_icon = "brush2pan.png"
-    plugin_version = "0.2.8"
+    plugin_version = "0.2.9"
     plugin_author = "lutian98"
     author_url = ""
     plugin_config_prefix = "brush2pan_"
@@ -656,6 +658,35 @@ class Brush2Pan(_PluginBase):
             logger.warning(f"刷流直传：连接 QB 失败: {e}")
             return None
 
+    def _select_video(self, files):
+        """从文件列表里挑主视频：剔除样片/花絮/小文件，识别剧集/多碟合集。
+        返回 (video_attr, code, count)；code: ok / no_files / tv / multi
+        """
+        vids = [f for f in files
+                if os.path.splitext(getattr(f, "name", ""))[1].lower() in VIDEO_EXT
+                and (getattr(f, "progress", 0) or 0) >= 0.999]
+        if not vids:
+            return None, "no_files", 0
+        main = max(vids, key=lambda f: getattr(f, "size", 0) or 0)
+        main_size = getattr(main, "size", 0) or 0
+        aux = []
+        rest = []
+        for f in vids:
+            if f is main:
+                continue
+            size = getattr(f, "size", 0) or 0
+            if AUX_RE.search(getattr(f, "name", "") or "") or (main_size and size < main_size * 0.05):
+                aux.append(f)
+            else:
+                rest.append(f)
+        if AUX_RE.search(getattr(main, "name", "") or "") and not rest:
+            return None, "aux_only", len(vids)
+        if EP_RE.search(getattr(main, "name", "") or ""):
+            return None, "tv", len(vids) - len(aux)
+        if rest:
+            return None, "multi", len(vids) - len(aux)
+        return main, "ok", len(aux)
+
     def scan(self) -> None:
         if not self._enabled:
             return
@@ -675,7 +706,7 @@ class Brush2Pan(_PluginBase):
                 continue
             h = getattr(t, "hash", "")
             rec = state.get(h)
-            if rec and rec.get("status") == "review" and str(rec.get("reason", "")).startswith("视频文件数=0"):
+            if rec and rec.get("status") == "review" and str(rec.get("reason", "")).startswith("视频文件数="):
                 state.pop(h, None)
                 rec = None
             if rec and rec.get("status") in ("done", "review", "error"):
@@ -691,20 +722,32 @@ class Brush2Pan(_PluginBase):
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"刷流直传：读取文件失败 {getattr(t,'name','')}: {e}")
                 continue
-            vids = [f for f in files
-                    if os.path.splitext(getattr(f, "name", ""))[1].lower() in VIDEO_EXT
-                    and (getattr(f, "progress", 0) or 0) >= 0.999]
-            if len(vids) == 0:
+            picked, code, ignored = self._select_video(files)
+            if code == "no_files":
                 # 文件列表可能尚未落盘/元数据未同步，下一轮重试，不写死 review
                 logger.info(f"刷流直传：文件未就绪，稍后重试 {getattr(t,'name','')}")
                 continue
-            if len(vids) > 1:
+            if code == "aux_only":
                 state[h] = {"status": "review", "name": getattr(t, "name", ""),
-                            "reason": f"视频文件数={len(vids)}（疑似剧集/合集）", "ts": time.time()}
-                logger.info(f"刷流直传：跳过 {getattr(t,'name','')}（视频文件数={len(vids)}）")
+                            "reason": "仅样片/花絮，无正片", "ts": time.time()}
+                logger.info(f"刷流直传：跳过 {getattr(t,'name','')}（仅样片/花絮）")
                 self.save_data("state_v2", state)
                 continue
-            video = {"name": vids[0].name, "size": vids[0].size}
+            if code == "tv":
+                state[h] = {"status": "review", "name": getattr(t, "name", ""),
+                            "reason": "剧集（口径：不收剧集）", "ts": time.time()}
+                logger.info(f"刷流直传：REJECT {getattr(t,'name','')} → 剧集")
+                self.save_data("state_v2", state)
+                continue
+            if code == "multi":
+                state[h] = {"status": "review", "name": getattr(t, "name", ""),
+                            "reason": f"视频文件数={ignored}（疑似剧集/合集）", "ts": time.time()}
+                logger.info(f"刷流直传：跳过 {getattr(t,'name','')}（实质视频数={ignored}）")
+                self.save_data("state_v2", state)
+                continue
+            if ignored:
+                logger.info(f"刷流直传：忽略 {ignored} 个样片/花絮文件 {getattr(t,'name','')}")
+            video = {"name": picked.name, "size": picked.size}
             meta = self._parse_release(video["name"])
             if meta["is_tv"]:
                 state[h] = {"status": "review", "name": getattr(t, "name", ""),
