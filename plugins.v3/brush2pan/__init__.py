@@ -52,7 +52,7 @@ class Brush2Pan(_PluginBase):
     plugin_name = "刷流直传 115"
     plugin_desc = "刷流完成的影片按口径筛选后，经 CD2 直传 115 固定目录并按 TMDB 重命名"
     plugin_icon = "brush2pan.png"
-    plugin_version = "0.1.3"
+    plugin_version = "0.1.4"
     plugin_author = "lutian98"
     author_url = ""
     plugin_config_prefix = "brush2pan_"
@@ -103,7 +103,25 @@ class Brush2Pan(_PluginBase):
             "methods": ["GET"],
             "summary": "识别测试",
             "description": "传入 release 文件名，返回解析/TMDB/命名结果，不复制",
+        }, {
+            "path": "/selftest",
+            "endpoint": self.api_selftest,
+            "methods": ["GET"],
+            "summary": "CD2 连通性自检",
+            "description": "检查 grpcurl/协议/Token 是否可用，返回 CD2 挂载点，不复制任何文件",
         }]
+
+    def api_selftest(self):
+        if not self._cd2_token:
+            return {"ok": False, "error": "未配置 CD2 Token"}
+        try:
+            data = self._cd2("GetMountPoints")
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": str(e)[:300]}
+        mounts = data.get("mountPoints") or []
+        return {"ok": True, "mounts": [{"name": m.get("name"), "mountPoint": m.get("mountPoint"),
+                                        "sourceDir": m.get("sourceDir"), "isMounted": m.get("isMounted")}
+                                       for m in mounts]}
 
     def api_probe(self, name: str = ""):
         meta = self._parse_release(name)
