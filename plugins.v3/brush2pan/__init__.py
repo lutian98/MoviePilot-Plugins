@@ -52,7 +52,7 @@ class Brush2Pan(_PluginBase):
     plugin_name = "刷流直传 115"
     plugin_desc = "刷流完成的影片按口径筛选后，经 CD2 直传 115 固定目录并按 TMDB 重命名"
     plugin_icon = "brush2pan.png"
-    plugin_version = "0.1.4"
+    plugin_version = "0.1.5"
     plugin_author = "lutian98"
     author_url = ""
     plugin_config_prefix = "brush2pan_"
@@ -301,10 +301,30 @@ class Brush2Pan(_PluginBase):
         raw = re.sub(r"\s+", " ", raw)
         return {"title": cn or raw, "year": year, "resolution": res, "is_tv": tv, "cn": cn}
 
+    @staticmethod
+    def _title_variants(title: str) -> List[str]:
+        """中英混排标题拆出中文/英文候选，提升 TMDB 命中率。"""
+        out = [title]
+        cjk = "".join(ch for ch in title if "\u4e00" <= ch <= "\u9fff")
+        if cjk and cjk != title:
+            out.append(cjk)
+        non_cjk = re.sub(r"[\u4e00-\u9fff]+", " ", title)
+        non_cjk = re.sub(r"\s+", " ", non_cjk).strip(" -_")
+        if non_cjk and non_cjk != title:
+            out.append(non_cjk)
+        return [x for x in out if x]
+
     def _tmdb_search(self, title: str, year: Optional[int], is_tv: bool) -> Optional[dict]:
         if not self._tmdb_key:
             logger.warning("刷流直传：没有 TMDB key")
             return None
+        for variant in self._title_variants(title) or [title]:
+            result = self._tmdb_search_one(variant, year, is_tv)
+            if result:
+                return result
+        return None
+
+    def _tmdb_search_one(self, title: str, year: Optional[int], is_tv: bool) -> Optional[dict]:
         path = "search/tv" if is_tv else "search/movie"
         params = {"api_key": self._tmdb_key, "query": title, "language": "zh-CN"}
         if year:
