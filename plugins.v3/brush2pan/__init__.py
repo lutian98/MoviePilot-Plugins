@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import tarfile
 import time
@@ -52,7 +53,7 @@ class Brush2Pan(_PluginBase):
     plugin_name = "刷流直传 115"
     plugin_desc = "刷流完成的影片按口径筛选后，经 CD2 直传 115 固定目录并按 TMDB 重命名"
     plugin_icon = "brush2pan.png"
-    plugin_version = "0.1.5"
+    plugin_version = "0.1.6"
     plugin_author = "lutian98"
     author_url = ""
     plugin_config_prefix = "brush2pan_"
@@ -68,6 +69,7 @@ class Brush2Pan(_PluginBase):
     _save_prefix: str = "/downloads"
     _min_size_mb: int = 300
     _tmdb_key: str = ""
+    _require_chs: bool = True
 
     def __init__(self) -> None:
         super().__init__()
@@ -88,6 +90,7 @@ class Brush2Pan(_PluginBase):
         except Exception:
             self._min_size_mb = 300
         self._tmdb_key = str(cfg.get("tmdb_key") or getattr(settings, "TMDB_API_KEY", "") or "")
+        self._require_chs = bool(cfg.get("require_chs", True))
         logger.info(f"刷流直传：init enabled={self._enabled} dry_run={self._dry_run} dest={self._dest_root}")
 
     def get_state(self) -> bool:
@@ -104,12 +107,25 @@ class Brush2Pan(_PluginBase):
             "summary": "识别测试",
             "description": "传入 release 文件名，返回解析/TMDB/命名结果，不复制",
         }, {
+            "path": "/subcheck",
+            "endpoint": self.api_subcheck,
+            "methods": ["GET"],
+            "summary": "中字检测",
+            "description": "传入种子内视频相对路径，检测外挂/内嵌中字",
+        }, {
             "path": "/selftest",
             "endpoint": self.api_selftest,
             "methods": ["GET"],
             "summary": "CD2 连通性自检",
             "description": "检查 grpcurl/协议/Token 是否可用，返回 CD2 挂载点，不复制任何文件",
         }]
+
+    def api_subcheck(self, name: str = ""):
+        if not name or ".." in name:
+            return {"ok": False, "error": "name 必须是种子内相对路径"}
+        video = {"name": name, "size": 0}
+        ok, reason = self._has_chs(video, [])
+        return {"ok": ok, "reason": reason, "path": os.path.join(self._save_prefix, name.lstrip("/"))}
 
     def api_selftest(self):
         if not self._cd2_token:
@@ -164,6 +180,11 @@ class Brush2Pan(_PluginBase):
                                 "model": "dry_run", "label": "演练模式（只判定不复制）",
                                 "hint": "首次启用建议开启，只写日志/台账，不调用 CD2 CopyFile。",
                                 "persistent-hint": True}}]},
+                        {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [
+                            {"component": "VSwitch", "props": {
+                                "model": "require_chs", "label": "必须含中字",
+                                "hint": "检查外挂字幕文件 / 内嵌字幕流 / 文件名标注；未发现中字则拒绝。",
+                                "persistent-hint": True}}]},
                     ]},
                     {"component": "VRow", "content": [
                         {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
@@ -207,6 +228,7 @@ class Brush2Pan(_PluginBase):
         ], {
             "enabled": False,
             "dry_run": True,
+            "require_chs": True,
             "cd2_grpc": "",
             "cd2_token": "",
             "src_prefix": "/Unraid/Media/刷流",
@@ -357,7 +379,41 @@ class Brush2Pan(_PluginBase):
             logger.warning(f"刷流直传：TMDB 查询失败 {title}: {e}")
             return None
 
-    def _judge(self, meta: dict, video: dict) -> Tuple[bool, str]:
+    SUB_EXT = {".srt", ".ass", ".ssa", ".sup", ".sub", ".idx"}
+
+    def _has_chs(self, video: dict, files: List[Any]) -> Tuple[bool, str]:
+        """判断是否含中字：外挂字幕文件 → 文件名标注 → ffprobe 内嵌字幕流。"""
+        for f in files:
+            if os.path.splitext(getattr(f, "name", ""))[1].lower() in self.SUB_EXT:
+                return True, f"外挂字幕 {os.path.basename(getattr(f,'name',''))}"
+        name = video.get("name", "")
+        if re.search(r"(中字|中文字幕|简繁|简中|繁中|简体|繁体|CHS|CHT|Chinese)", name, re.I):
+            return True, "文件名标注中字"
+        ffprobe = shutil.which("ffprobe") or "/usr/local/bin/ffprobe"
+        path = os.path.join(self._save_prefix, name.lstrip("/"))
+        try:
+            r = subprocess.run(
+                [ffprobe, "-v", "quiet", "-print_format", "json", "-show_streams",
+                 "-select_streams", "s", path],
+                capture_output=True, text=True, timeout=60)
+        except Exception as e:  # noqa: BLE001
+            return False, f"ffprobe 执行失败: {e}"
+        try:
+            streams = json.loads(r.stdout or "{}").get("streams", [])
+        except Exception:
+            streams = []
+        if not streams:
+            return False, "未发现中文字幕（无外挂、无内嵌字幕流）"
+        for st in streams:
+            tags = st.get("tags") or {}
+            lang = str(tags.get("language") or "").lower()
+            title = str(tags.get("title") or "")
+            if lang in ("chi", "zho", "zh", "cmn", "yue", "chs", "cht") or \
+                    re.search(r"(中|简|繁|CHS|CHT|Chinese)", title, re.I):
+                return True, f"内嵌字幕 {lang or title or st.get('codec_name','')}"
+        return False, f"内嵌字幕 {len(streams)} 条，但无中文标记"
+
+    def _judge(self, meta: dict, video: dict, chs_ok: bool = True, chs_reason: str = "") -> Tuple[bool, str]:
         name = video.get("name", "")
         nl = name.lower()
         size_mb = (video.get("size") or 0) / 1024 / 1024
@@ -373,7 +429,9 @@ class Brush2Pan(_PluginBase):
             return False, f"文件过小 {size_mb:.0f}MB < {self._min_size_mb}MB"
         if "sample" in nl:
             return False, "sample"
-        return True, "通过（题材/分级口径待补）"
+        if self._require_chs and not chs_ok:
+            return False, f"无中字（{chs_reason}）"
+        return True, "通过（中字✓；题材/分级口径待补）"
 
     @staticmethod
     def _build_names(meta: dict, tmdb: dict, video: dict) -> Tuple[int, str, str]:
@@ -471,7 +529,8 @@ class Brush2Pan(_PluginBase):
                 logger.info(f"刷流直传：TMDB 未识别 {meta['title']} {meta['year']}")
                 self.save_data("state_v2", state)
                 continue
-            ok, reason = self._judge(meta, video)
+            chs_ok, chs_reason = (True, "未检查") if not self._require_chs else self._has_chs(video, files)
+            ok, reason = self._judge(meta, video, chs_ok, chs_reason)
             if not ok:
                 state[h] = {"status": "review", "name": getattr(t, "name", ""), "reason": reason,
                             "meta": meta, "ts": time.time()}
