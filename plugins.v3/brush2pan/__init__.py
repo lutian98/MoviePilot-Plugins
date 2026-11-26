@@ -53,7 +53,7 @@ class Brush2Pan(_PluginBase):
     plugin_name = "刷流直传 115"
     plugin_desc = "刷流完成的影片按口径筛选后，经 CD2 直传 115 固定目录并按 TMDB 重命名"
     plugin_icon = "brush2pan.png"
-    plugin_version = "0.1.8"
+    plugin_version = "0.1.9"
     plugin_author = "lutian98"
     author_url = ""
     plugin_config_prefix = "brush2pan_"
@@ -162,23 +162,33 @@ class Brush2Pan(_PluginBase):
         rows = self._status_rows()
         if rows is None:
             return [{"component": "VAlert", "props": {"type": "warning", "text": "未找到可用的 qbittorrent 下载器"}}]
-        return [
-            {"component": "VAlert", "props": {
-                "type": "info", "variant": "tonal",
-                "text": f"刷流种子 {len(rows)} 个：done {sum(1 for r in rows if r['status']=='done')}；"
-                        f"拒绝/跳过 {sum(1 for r in rows if r['status']=='review')}；"
-                        f"其他 {sum(1 for r in rows if r['status'] not in ('done','review'))}"}},
-            {"component": "VDataTable", "props": {
-                "headers": [
-                    {"title": "种子", "key": "name"},
-                    {"title": "体积", "key": "size"},
-                    {"title": "进度", "key": "progress"},
-                    {"title": "状态", "key": "status"},
-                    {"title": "原因 / 目标", "key": "reason"},
-                ],
-                "items": rows, "density": "compact", "itemsPerPage": 50,
-            }},
-        ]
+        done = sum(1 for r in rows if r["status"] == "done")
+        review = sum(1 for r in rows if r["status"] == "review")
+        other = len(rows) - done - review
+        panels = []
+        for r in rows:
+            panels.append({
+                "component": "VExpansionPanel",
+                "props": {"title": f"[{r['status']}] {r['name']}　{r['size']}　{r['progress']}"},
+                "content": [{
+                    "component": "div",
+                    "props": {"class": "text-caption"},
+                    "text": f"原因 / 目标：{r['reason']}",
+                }],
+            })
+        return [{
+            "component": "VCard",
+            "props": {"variant": "outlined"},
+            "content": [
+                {"component": "VCardTitle", "props": {"class": "text-h6"}, "text": "刷流种子与拒绝原因"},
+                {"component": "VDivider"},
+                {"component": "VCardText", "content": [
+                    {"component": "div", "props": {"class": "text-body-2 mb-2"},
+                     "text": f"共 {len(rows)} 个：done {done}；拒绝/跳过 {review}；下载中/待处理 {other}"},
+                    {"component": "VExpansionPanels", "content": panels},
+                ]},
+            ],
+        }]
 
     def _status_rows(self):
         client = self._qb_client()
