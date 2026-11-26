@@ -53,7 +53,7 @@ class Brush2Pan(_PluginBase):
     plugin_name = "刷流直传 115"
     plugin_desc = "刷流完成的影片按口径筛选后，经 CD2 直传 115 固定目录并按 TMDB 重命名"
     plugin_icon = "brush2pan.png"
-    plugin_version = "0.2.4"
+    plugin_version = "0.2.5"
     plugin_author = "lutian98"
     author_url = ""
     plugin_config_prefix = "brush2pan_"
@@ -241,7 +241,7 @@ class Brush2Pan(_PluginBase):
                     "props": {"size": "small", "variant": variant, "class": "mr-1 mb-1",
                               "disabled": bool(disabled)},
                     "text": text,
-                    "events": {"click": {"api": "/api/v1/plugin/Brush2Pan/ui", "method": "GET",
+                    "events": {"click": {"api": "/plugin/Brush2Pan/ui", "method": "GET",
                                          "params": {"page": target_page, "size": target_size}}}}
         controls = []
         controls.append({"component": "VCol", "props": {"cols": "auto"}, "content": [
