@@ -60,7 +60,7 @@ class Brush2Pan(_PluginBase):
     plugin_name = "刷流直传 115"
     plugin_desc = "刷流完成的影片按口径筛选后，经 CD2 直传 115 固定目录并按 TMDB 重命名"
     plugin_icon = "brush2pan.png"
-    plugin_version = "0.3.4"
+    plugin_version = "0.3.5"
     plugin_author = "lutian98"
     author_url = ""
     plugin_config_prefix = "brush2pan_"
@@ -191,7 +191,7 @@ class Brush2Pan(_PluginBase):
             return {"ok": False, "error": "imdb 需为 tt 开头的 tconst"}
         bad = self._imdb_adult(imdb)
         return {"imdb": imdb, "index_ready": bad is not None, "adult": bad,
-                "reason": "索引未就绪" if bad is None else ("色情（IMDb Adult）" if bad else "非成人")}
+                "reason": "索引未就绪" if bad is None else ("成人影片（IMDb Adult）" if bad else "非成人")}
 
     def api_audiocheck(self, name: str = ""):
         if not name or ".." in name:
@@ -739,7 +739,7 @@ class Brush2Pan(_PluginBase):
             self._imdb_ensure(background=True)
             return None, "IMDb 索引未就绪（后台构建中）"
         bad = imdb_id in (self._imdb_set() or set())
-        return (True, f"色情（IMDb Adult {imdb_id}）") if bad else (False, f"IMDb {imdb_id} 非成人")
+        return (True, f"成人影片（IMDb Adult {imdb_id}，口径：排除）") if bad else (False, f"IMDb {imdb_id} 非成人")
 
     def _genre_check(self, tmdb: dict, is_tv: bool = False):
         """题材/分级口径：排除恐怖(27)、惊悚(53)；类型为空视为未知直接拒；adult=true 拒。"""
