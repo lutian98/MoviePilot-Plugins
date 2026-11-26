@@ -53,7 +53,7 @@ class Brush2Pan(_PluginBase):
     plugin_name = "刷流直传 115"
     plugin_desc = "刷流完成的影片按口径筛选后，经 CD2 直传 115 固定目录并按 TMDB 重命名"
     plugin_icon = "brush2pan.png"
-    plugin_version = "0.1.6"
+    plugin_version = "0.1.7"
     plugin_author = "lutian98"
     author_url = ""
     plugin_config_prefix = "brush2pan_"
@@ -124,7 +124,7 @@ class Brush2Pan(_PluginBase):
         if not name or ".." in name:
             return {"ok": False, "error": "name 必须是种子内相对路径"}
         video = {"name": name, "size": 0}
-        ok, reason = self._has_chs(video, [])
+        ok, reason = self._has_chs(video, [], None)
         return {"ok": ok, "reason": reason, "path": os.path.join(self._save_prefix, name.lstrip("/"))}
 
     def api_selftest(self):
@@ -381,29 +381,38 @@ class Brush2Pan(_PluginBase):
 
     SUB_EXT = {".srt", ".ass", ".ssa", ".sup", ".sub", ".idx"}
 
-    def _has_chs(self, video: dict, files: List[Any]) -> Tuple[bool, str]:
-        """判断是否含中字：外挂字幕文件 → 文件名标注 → ffprobe 内嵌字幕流。"""
-        for f in files:
-            if os.path.splitext(getattr(f, "name", ""))[1].lower() in self.SUB_EXT:
-                return True, f"外挂字幕 {os.path.basename(getattr(f,'name',''))}"
+    @staticmethod
+    def _cjk(text: str) -> bool:
+        return bool(re.search(r"[\u4e00-\u9fff]", text or ""))
+
+    def _has_chs(self, video: dict, files: List[Any], meta: Optional[dict] = None) -> Tuple[bool, str]:
+        """判断是否含中字：外挂字幕（读文本）→ 文件名标注 → 内嵌流（标签/抽文本/中文片兜底）。"""
         name = video.get("name", "")
+        path = os.path.join(self._save_prefix, name.lstrip("/"))
+        for f in files:
+            fname = getattr(f, "name", "")
+            if os.path.splitext(fname)[1].lower() in self.SUB_EXT:
+                try:
+                    blob = open(os.path.join(self._save_prefix, fname.lstrip("/")), "rb").read(65536)
+                    if self._cjk(blob.decode("utf-8", "ignore")):
+                        return True, f"外挂中文字幕 {os.path.basename(fname)}"
+                except Exception:
+                    pass
         if re.search(r"(中字|中文字幕|简繁|简中|繁中|简体|繁体|CHS|CHT|Chinese)", name, re.I):
             return True, "文件名标注中字"
         ffprobe = shutil.which("ffprobe") or "/usr/local/bin/ffprobe"
-        path = os.path.join(self._save_prefix, name.lstrip("/"))
         try:
             r = subprocess.run(
                 [ffprobe, "-v", "quiet", "-print_format", "json", "-show_streams",
                  "-select_streams", "s", path],
                 capture_output=True, text=True, timeout=60)
+            streams = json.loads(r.stdout or "{}").get("streams", [])
         except Exception as e:  # noqa: BLE001
             return False, f"ffprobe 执行失败: {e}"
-        try:
-            streams = json.loads(r.stdout or "{}").get("streams", [])
-        except Exception:
-            streams = []
         if not streams:
             return False, "未发现中文字幕（无外挂、无内嵌字幕流）"
+        text_codecs = {"subrip", "ass", "ssa", "webvtt", "mov_text", "srt", "text"}
+        image_codecs = {"hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle", "xsub"}
         for st in streams:
             tags = st.get("tags") or {}
             lang = str(tags.get("language") or "").lower()
@@ -411,7 +420,24 @@ class Brush2Pan(_PluginBase):
             if lang in ("chi", "zho", "zh", "cmn", "yue", "chs", "cht") or \
                     re.search(r"(中|简|繁|CHS|CHT|Chinese)", title, re.I):
                 return True, f"内嵌字幕 {lang or title or st.get('codec_name','')}"
-        return False, f"内嵌字幕 {len(streams)} 条，但无中文标记"
+        # 文本字幕：抽第一条转 srt，看是否含 CJK
+        ffmpeg = shutil.which("ffmpeg") or "/usr/local/bin/ffmpeg"
+        if any((st.get("codec_name") in text_codecs) for st in streams):
+            try:
+                r = subprocess.run([ffmpeg, "-v", "quiet", "-i", path,
+                                    "-map", "0:s:0", "-f", "srt", "-"],
+                                   capture_output=True, text=True, timeout=120)
+                if self._cjk(r.stdout[:200000]):
+                    return True, "内嵌文本字幕含中文"
+            except Exception:
+                pass
+        # 图形字幕（PGS 等）无法抽文本：中文片默认有中字
+        if meta and (meta.get("tmdb_lang") in ("zh", "cn", "yue", "cmn")
+                     or self._cjk(meta.get("tmdb_title") or "")):
+            return True, "图形字幕未标注，中文片默认中字"
+        if any(st.get("codec_name") in image_codecs for st in streams):
+            return False, "图形字幕（PGS）无中文标记，非中文片"
+        return False, f"内嵌字幕 {len(streams)} 条，但未检出中文"
 
     def _judge(self, meta: dict, video: dict, chs_ok: bool = True, chs_reason: str = "") -> Tuple[bool, str]:
         name = video.get("name", "")
@@ -529,7 +555,9 @@ class Brush2Pan(_PluginBase):
                 logger.info(f"刷流直传：TMDB 未识别 {meta['title']} {meta['year']}")
                 self.save_data("state_v2", state)
                 continue
-            chs_ok, chs_reason = (True, "未检查") if not self._require_chs else self._has_chs(video, files)
+            chs_meta = {"tmdb_lang": tmdb.get("original_language"),
+                        "tmdb_title": tmdb.get("title") or tmdb.get("name")}
+            chs_ok, chs_reason = (True, "未检查") if not self._require_chs else self._has_chs(video, files, chs_meta)
             ok, reason = self._judge(meta, video, chs_ok, chs_reason)
             if not ok:
                 state[h] = {"status": "review", "name": getattr(t, "name", ""), "reason": reason,
