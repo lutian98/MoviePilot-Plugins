@@ -60,7 +60,7 @@ class Brush2Pan(_PluginBase):
     plugin_name = "刷流直传 115"
     plugin_desc = "刷流完成的影片按口径筛选后，经 CD2 直传 115 固定目录并按 TMDB 重命名"
     plugin_icon = "brush2pan.png"
-    plugin_version = "0.3.3"
+    plugin_version = "0.3.4"
     plugin_author = "lutian98"
     author_url = ""
     plugin_config_prefix = "brush2pan_"
@@ -175,7 +175,14 @@ class Brush2Pan(_PluginBase):
         st["enabled"] = bool(getattr(self, "_imdb_adult_check", True))
         return st
 
-    def api_imdbupdate(self, force: int = 1):
+    def api_imdbupdate(self, force: int = 1, rebuild: int = 0):
+        if int(rebuild or 0):
+            if not self._imdb_status()["dataset"]:
+                return {"started": False, "error": "数据集不存在，无法只重建索引"}
+            t = threading.Thread(target=lambda: self._imdb_update(force=False), daemon=True)
+            self._imdb_worker = t
+            t.start()
+            return {"started": True, "mode": "rebuild_index_only", "status": self._imdb_status()}
         started = self._imdb_ensure(force=bool(int(force or 0)), background=True)
         return {"started": started, "status": self._imdb_status()}
 
@@ -625,7 +632,7 @@ class Brush2Pan(_PluginBase):
         if background:
             def job():
                 try:
-                    self._imdb_update()
+                    self._imdb_update(force=force)
                 except Exception as e:  # noqa: BLE001
                     logger.warning(f"刷流直传：IMDb 数据集更新失败 {e}")
             t = threading.Thread(target=job, daemon=True)
@@ -636,20 +643,7 @@ class Brush2Pan(_PluginBase):
         self._imdb_update()
         return True
 
-    def _imdb_update(self) -> None:
-        if not self._imdb_lock.acquire(blocking=False):
-            logger.info("刷流直传：IMDb 更新已在进行，跳过重复任务")
-            return
-        try:
-            self._imdb_update_locked()
-        finally:
-            self._imdb_lock.release()
-
-    def _imdb_update_locked(self) -> None:
-        d = self._imdb_dir()
-        d.mkdir(parents=True, exist_ok=True)
-        ds = d / "title.basics.tsv.gz"
-        tmp = d / "title.basics.tsv.part"
+    def _imdb_download(self, ds, tmp) -> None:
         logger.info("刷流直传：开始下载 IMDb 数据集（约 221MB）")
         with requests.get(IMDB_DATASET_URL, stream=True, timeout=(20, 180), proxies=self._proxies()) as r:
             r.raise_for_status()
@@ -666,7 +660,28 @@ class Brush2Pan(_PluginBase):
                         mark = got
                         logger.info(f"刷流直传：IMDb 数据集 {got/1024/1024:.0f}/{total/1024/1024:.0f}MB")
         tmp.replace(ds)
-        logger.info("刷流直传：IMDb 数据集下载完成，构建 Adult 索引")
+        logger.info("刷流直传：IMDb 数据集下载完成")
+
+    def _imdb_update(self, force: bool = False) -> None:
+        if not self._imdb_lock.acquire(blocking=False):
+            logger.info("刷流直传：IMDb 更新已在进行，跳过重复任务")
+            return
+        try:
+            self._imdb_update_locked(force=force)
+        finally:
+            self._imdb_lock.release()
+
+    def _imdb_update_locked(self, force: bool = False) -> None:
+        d = self._imdb_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        ds = d / "title.basics.tsv.gz"
+        tmp = d / "title.basics.tsv.part"
+        fresh = ds.exists() and (time.time() - ds.stat().st_mtime) < IMDB_MAX_AGE_DAYS * 86400
+        if fresh and not force:
+            logger.info("刷流直传：IMDb 数据集仍在有效期内，跳过下载，仅重建索引")
+        else:
+            self._imdb_download(ds, tmp)
+        logger.info("刷流直传：构建 IMDb Adult 索引")
         adult = set()
         n = 0
         with gzip.open(ds, "rt", encoding="utf-8", errors="ignore") as f:
