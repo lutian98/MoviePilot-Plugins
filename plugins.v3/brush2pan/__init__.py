@@ -106,7 +106,7 @@ class Brush2Pan(_PluginBase):
     plugin_name = "刷流直传 115"
     plugin_desc = "刷流完成的影片按口径筛选后，经 CD2 直传 115 固定目录并按 TMDB 重命名"
     plugin_icon = "brush2pan.png"
-    plugin_version = "0.3.20"
+    plugin_version = "0.3.21"
     plugin_author = "lutian98"
     author_url = ""
     plugin_config_prefix = "brush2pan_"
@@ -298,6 +298,7 @@ class Brush2Pan(_PluginBase):
             out["genre_reason"] = greason
             out["genres"] = [g.get("name") for g in ((gdetail or {}).get("genres") or []) if isinstance(g, dict)]
             out["adult"] = bool((gdetail or {}).get("adult"))
+            out["runtime"] = (gdetail or {}).get("runtime")
         if tmdb:
             year, folder, fname = self._build_names(meta, tmdb, {"name": name})
             out["year"], out["folder"], out["target_name"] = year, folder, fname
@@ -997,9 +998,15 @@ class Brush2Pan(_PluginBase):
         ffprobe = shutil.which("ffprobe") or "/usr/local/bin/ffprobe"
         out = {"audio": [], "video": []}
         try:
-            r = subprocess.run([ffprobe, "-v", "quiet", "-print_format", "json", "-show_streams", path],
+            r = subprocess.run([ffprobe, "-v", "quiet", "-print_format", "json",
+                                "-show_format", "-show_streams", path],
                                capture_output=True, text=True, timeout=60)
-            for st in json.loads(r.stdout or "{}").get("streams", []):
+            raw = json.loads(r.stdout or "{}")
+            try:
+                out["duration"] = float((raw.get("format") or {}).get("duration") or 0) or None
+            except Exception:
+                out["duration"] = None
+            for st in raw.get("streams", []):
                 info = {k: st.get(k) for k in ("index", "codec_name", "profile", "channels",
                                                 "channel_layout", "sample_rate", "bit_rate",
                                                 "pix_fmt", "color_transfer", "color_primaries", "width", "height")
