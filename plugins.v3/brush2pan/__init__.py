@@ -42,6 +42,8 @@ AUDIO_BAD = re.compile(r"(?i)(truehd|dts)")
 RETRY_DELAYS = (300, 900, 3600)
 MAX_RETRY = 3
 COPY_TIMEOUT = 7200
+# 规则版本：变更后自动重评历史 review 条目（v2=音轨改为只排 TrueHD/DTS，default 轨判定）
+POLICY_VER = 2
 # token 化的标记识别：按分隔符切 token，避免 "dd"/"dv" 子串误伤片名（Hidden.Figures → Hi）
 TOKEN_SPLIT_RE = re.compile(r"[^0-9A-Za-z\u4e00-\u9fff]+")
 MARKER_TOKENS = {
@@ -106,7 +108,7 @@ class Brush2Pan(_PluginBase):
     plugin_name = "刷流直传 115"
     plugin_desc = "刷流完成的影片按口径筛选后，经 CD2 直传 115 固定目录并按 TMDB 重命名"
     plugin_icon = "brush2pan.png"
-    plugin_version = "0.3.21"
+    plugin_version = "0.3.22"
     plugin_author = "lutian98"
     author_url = ""
     plugin_config_prefix = "brush2pan_"
@@ -199,6 +201,12 @@ class Brush2Pan(_PluginBase):
             "summary": "IMDb 成人检测",
             "description": "传入 tconst（tt...），返回是否 Adult",
         }, {
+            "path": "/retry",
+            "endpoint": self.api_retry,
+            "methods": ["GET"],
+            "summary": "重评/重试一条台账",
+            "description": "传 name 或 hash，删除该条台账状态，下一轮扫描重新判定（用于规则变更后旧拒绝重评）",
+        }, {
             "path": "/audiocheck",
             "endpoint": self.api_audiocheck,
             "methods": ["GET"],
@@ -240,6 +248,23 @@ class Brush2Pan(_PluginBase):
         bad = self._imdb_adult(imdb)
         return {"imdb": imdb, "index_ready": bad is not None, "adult": bad,
                 "reason": "索引未就绪" if bad is None else ("成人影片（IMDb Adult）" if bad else "非成人")}
+
+    def api_retry(self, name: str = "", hash: str = ""):
+        state = self.get_data("state_v2") or {}
+        target = None
+        if hash and hash in state:
+            target = hash
+        elif name:
+            for h, rec in state.items():
+                if (rec or {}).get("name") == name:
+                    target = h
+                    break
+        if not target:
+            return {"ok": False, "error": "未找到对应台账（name/hash）"}
+        old = state.pop(target)
+        self.save_data("state_v2", state)
+        return {"ok": True, "hash": target, "removed_status": (old or {}).get("status"),
+                "removed_reason": (old or {}).get("reason")}
 
     def api_audiocheck(self, name: str = "", detail: int = 0, path: str = ""):
         if path:
@@ -1200,6 +1225,24 @@ class Brush2Pan(_PluginBase):
                 return task
         return None
 
+    def _migrate_policy(self, state: dict) -> None:
+        """规则版本升级后，清掉历史 review 记录，让它们在下一轮按新规则重评一次。"""
+        try:
+            stored = int(self.get_data("policy_ver") or 0)
+        except Exception:
+            stored = 0
+        if stored >= POLICY_VER:
+            return
+        removed = 0
+        for h, rec in list(state.items()):
+            if (rec or {}).get("status") == "review":
+                state.pop(h, None)
+                removed += 1
+        if removed:
+            self.save_data("state_v2", state)
+        self.save_data("policy_ver", POLICY_VER)
+        logger.info(f"刷流直传：规则版本升级 v{stored}→v{POLICY_VER}，重评历史拒绝 {removed} 条")
+
     def _prune_state(self, state: dict, live_hashes: set) -> None:
         """清理已不在 QB 里的历史台账（BrushFlow 删种后），防 state_v2 无限增长。"""
         pruned = 0
@@ -1224,6 +1267,7 @@ class Brush2Pan(_PluginBase):
             logger.warning("刷流直传：没有可用的 qbittorrent 下载器")
             return
         state: dict = self.get_data("state_v2") or {}
+        self._migrate_policy(state)
         try:
             torrents = client.torrents_info()
         except Exception as e:  # noqa: BLE001
