@@ -38,7 +38,7 @@
     "name": "刷流直传 115",
     "description": "刷流完成的影片按口径筛选后，经 CD2 直传 115 固定目录并按 TMDB 重命名。",
     "labels": "刷流,115,文件整理",
-    "version": "0.3.16",
+    "version": "0.3.17",
     "icon": "brush2pan.png",
     "author": "lutian98",
     "level": 1,
@@ -81,7 +81,8 @@
       "v0.3.13": "音轨规则按实测修正：5.1（AC3/E-AC3）可正常播放 → 放行；DTS 5.1 与 TrueHD+Atmos 实测报错 → 按编码排除（truehd/dts/atmos），不再按 5.1 声道一刀切。",
       "v0.3.14": "音轨规则定稿（全面实测）：仅排除 TrueHD（含 TrueHD+Atmos）与 DTS 全家族（DTS/DTS-HD/DTS-X）。放行：AAC 2.0/5.1、AC3 5.1、E-AC3 5.1/7.1、DD+ Atmos、LPCM、4K DoVi/HDR 视频；5.1/7.1 声道本身不排除。",
       "v0.3.15": "诊断增强：/audiocheck 支持容器内 /downloads/ 绝对路径（path 参数），便于检查多音轨文件的轨道顺序与 default 标记。",
-      "v0.3.16": "修复 /audiocheck 绝对路径探测：_audio_check 未使用 _video_path 导致 rc=1。"
+      "v0.3.16": "修复 /audiocheck 绝对路径探测：_audio_check 未使用 _video_path 导致 rc=1。",
+      "v0.3.17": "音轨判据改为 default 轨优先（无 default 标记退回第一条），修复「第一条正常、第二条才是默认坏轨」误放行；临时增加 api_audiomux 用于合成多音轨测试样本。"
     }
   }
 }
