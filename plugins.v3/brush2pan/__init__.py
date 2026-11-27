@@ -106,7 +106,7 @@ class Brush2Pan(_PluginBase):
     plugin_name = "刷流直传 115"
     plugin_desc = "刷流完成的影片按口径筛选后，经 CD2 直传 115 固定目录并按 TMDB 重命名"
     plugin_icon = "brush2pan.png"
-    plugin_version = "0.3.19"
+    plugin_version = "0.3.20"
     plugin_author = "lutian98"
     author_url = ""
     plugin_config_prefix = "brush2pan_"
@@ -140,15 +140,17 @@ class Brush2Pan(_PluginBase):
         self._save_prefix = str(cfg.get("save_path") or "/downloads/刷流").rstrip("/")
         try:
             self._min_size_mb = int(cfg.get("min_size_mb") or 300)
-            self._imdb_enabled = bool(cfg.get("imdb_adult_check", True))
-            self._imdb_lock = threading.Lock()
-            if self._imdb_enabled:
-                try:
-                    self._imdb_ensure(background=True)
-                except Exception:
-                    pass
         except Exception:
             self._min_size_mb = 300
+        self._imdb_enabled = bool(cfg.get("imdb_adult_check", True))
+        self._imdb_lock = threading.Lock()
+        self._probe_cache = {}
+        self._tmdb_cache = {}
+        if self._imdb_enabled:
+            try:
+                self._imdb_ensure(background=True)
+            except Exception:
+                pass
         self._tmdb_key = str(cfg.get("tmdb_key") or getattr(settings, "TMDB_API_KEY", "") or "")
         self._require_chs = bool(cfg.get("require_chs", True))
         logger.info(f"刷流直传：init enabled={self._enabled} dry_run={self._dry_run} dest={self._dest_root}")
@@ -209,12 +211,6 @@ class Brush2Pan(_PluginBase):
             "summary": "中字检测",
             "description": "传入种子内视频相对路径，检测外挂/内嵌中字",
         }, {
-            "path": "/audiomux",
-            "endpoint": self.api_audiomux,
-            "methods": ["GET"],
-            "summary": "临时多音轨合成",
-            "description": "把 good/bad 两个文件的音轨合成一个 MKV，用于验证 default 轨播放行为（诊断用）",
-        }, {
             "path": "/selftest",
             "endpoint": self.api_selftest,
             "methods": ["GET"],
@@ -244,33 +240,6 @@ class Brush2Pan(_PluginBase):
         bad = self._imdb_adult(imdb)
         return {"imdb": imdb, "index_ready": bad is not None, "adult": bad,
                 "reason": "索引未就绪" if bad is None else ("成人影片（IMDb Adult）" if bad else "非成人")}
-
-    def api_audiomux(self, good: str = "", bad: str = "", out: str = "", default_track: str = "first", duration: int = 0):
-        """临时诊断接口：把 good 文件的音轨0 与 bad 文件的音轨0 合成到一个 MKV，用于验证多音轨/default 播放行为。"""
-        if not good or not bad or ".." in good + bad or ".." in (out or ""):
-            return {"ok": False, "error": "good/bad 必须是刷流内相对路径"}
-        base = os.path.join(self._save_prefix, "_audiotest")
-        os.makedirs(base, exist_ok=True)
-        src1 = self._video_path({"name": good})
-        src2 = self._video_path({"name": bad})
-        name = out or "mix_test.mkv"
-        if not name.endswith(".mkv"):
-            name += ".mkv"
-        outp = os.path.join(base, name)
-        ffmpeg = shutil.which("ffmpeg") or "/usr/local/bin/ffmpeg"
-        disp = ["-disposition:a:0", "default", "-disposition:a:1", "0"] if default_track == "first" else                ["-disposition:a:0", "0", "-disposition:a:1", "default"]
-        cmd = [ffmpeg, "-y", "-i", src1, "-i", src2, "-map", "0:v:0", "-map", "0:a:0", "-map", "1:a:0",
-               "-c", "copy"]
-        if int(duration or 0) > 0:
-            cmd += ["-t", str(int(duration))]
-        cmd += disp + [outp]
-        try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
-        except Exception as e:  # noqa: BLE001
-            return {"ok": False, "error": str(e)}
-        if r.returncode != 0 or not os.path.exists(outp):
-            return {"ok": False, "error": (r.stderr or "")[-600:]}
-        return {"ok": True, "path": outp, "size": os.path.getsize(outp), "default_track": default_track}
 
     def api_audiocheck(self, name: str = "", detail: int = 0, path: str = ""):
         if path:
@@ -715,9 +684,16 @@ class Brush2Pan(_PluginBase):
         if not self._tmdb_key:
             logger.warning("刷流直传：没有 TMDB key")
             return None
+        key = (title, year, bool(is_tv))
+        cache = getattr(self, "_tmdb_cache", None)
+        if cache is None:
+            cache = self._tmdb_cache = {}
+        if key in cache:
+            return cache[key]
         for variant in self._title_variants(title) or [title]:
             result = self._tmdb_search_one(variant, year, is_tv)
             if result:
+                cache[key] = result
                 return result
         return None
 
@@ -944,6 +920,18 @@ class Brush2Pan(_PluginBase):
     def _cjk(text: str) -> bool:
         return bool(re.search(r"[\u4e00-\u9fff]", text or ""))
 
+    def _has_chs_cached(self, video: dict, files: List[Any], meta: Optional[dict] = None) -> Tuple[bool, str]:
+        path = self._video_path(video)
+        cache = getattr(self, "_chs_cache", None)
+        if cache is None:
+            cache = self._chs_cache = {}
+        if path in cache:
+            return cache[path]
+        result = self._has_chs(video, files, meta)
+        if "执行失败" not in result[1] and "检测失败" not in result[1]:
+            cache[path] = result
+        return result
+
     def _has_chs(self, video: dict, files: List[Any], meta: Optional[dict] = None) -> Tuple[bool, str]:
         """判断是否含中字：外挂字幕（读文本）→ 文件名标注 → 内嵌流（标签/抽文本/中文片兜底）。"""
         name = video.get("name", "")
@@ -1026,7 +1014,20 @@ class Brush2Pan(_PluginBase):
         return out
 
     def _audio_check(self, video: dict) -> Tuple[bool, str]:
-        """读实际音频流：默认（第一条）音轨 6 声道 = 5.1 → 拒绝。与中字检测同样走 ffprobe。"""
+        """带缓存的音轨检测（同一文件只探测一次，失败不缓存）。"""
+        path = self._video_path(video)
+        cache = getattr(self, "_probe_cache", None)
+        if cache is None:
+            cache = self._probe_cache = {}
+        if path in cache:
+            return cache[path]
+        result = self._audio_check_raw(video)
+        if "检测失败" not in result[1]:
+            cache[path] = result
+        return result
+
+    def _audio_check_raw(self, video: dict) -> Tuple[bool, str]:
+        """读实际音频流（default 轨优先）：TrueHD / DTS 拒绝。"""
         path = self._video_path(video)
         ffprobe = shutil.which("ffprobe") or "/usr/local/bin/ffprobe"
         try:
@@ -1192,6 +1193,22 @@ class Brush2Pan(_PluginBase):
                 return task
         return None
 
+    def _prune_state(self, state: dict, live_hashes: set) -> None:
+        """清理已不在 QB 里的历史台账（BrushFlow 删种后），防 state_v2 无限增长。"""
+        pruned = 0
+        now = time.time()
+        for h, rec in list(state.items()):
+            if h in live_hashes:
+                continue
+            if (rec or {}).get("status") == "copying":
+                continue
+            if now - float((rec or {}).get("ts") or 0) < 86400:
+                continue
+            state.pop(h, None)
+            pruned += 1
+        if pruned:
+            logger.info(f"刷流直传：清理已删除种子的历史台账 {pruned} 条")
+
     def scan(self) -> None:
         if not self._enabled:
             return
@@ -1205,7 +1222,12 @@ class Brush2Pan(_PluginBase):
         except Exception as e:  # noqa: BLE001
             logger.warning(f"刷流直传：列举种子失败: {e}")
             return
+        self._prune_state(state, {getattr(t, "hash", "") for t in torrents})
+        started = time.time()
         for t in torrents:
+            if time.time() - started > 50:
+                logger.info("刷流直传：本轮扫描超过 50 秒，剩余种子下一轮继续")
+                break
             try:
                 self._process_torrent(t, state, client)
             except Exception as e:  # noqa: BLE001
@@ -1272,7 +1294,8 @@ class Brush2Pan(_PluginBase):
                 logger.info(f"刷流直传：REJECT {name} → 文件未就绪超时")
             else:
                 state[h] = {"status": "waiting", "name": name, "attempts": attempts, "ts": time.time()}
-                logger.info(f"刷流直传：文件未就绪，等待（第{attempts}次） {name}")
+                if attempts <= 2 or attempts in (5, 10):
+                    logger.info(f"刷流直传：文件未就绪，等待（第{attempts}次） {name}")
             self.save_data("state_v2", state)
             return
         if code == "disc":
@@ -1348,7 +1371,7 @@ class Brush2Pan(_PluginBase):
                 return
         chs_meta = {"tmdb_lang": tmdb.get("original_language"),
                     "tmdb_title": tmdb.get("title") or tmdb.get("name")}
-        chs_ok, chs_reason = (True, "未检查") if not self._require_chs else self._has_chs(video, files, chs_meta)
+        chs_ok, chs_reason = (True, "未检查") if not self._require_chs else self._has_chs_cached(video, files, chs_meta)
         if self._require_chs and not chs_ok and "执行失败" in chs_reason:
             self._schedule_retry(state, h, name, f"中字检测失败: {chs_reason}")
             self.save_data("state_v2", state)
