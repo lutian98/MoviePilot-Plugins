@@ -106,7 +106,7 @@ class Brush2Pan(_PluginBase):
     plugin_name = "刷流直传 115"
     plugin_desc = "刷流完成的影片按口径筛选后，经 CD2 直传 115 固定目录并按 TMDB 重命名"
     plugin_icon = "brush2pan.png"
-    plugin_version = "0.3.18"
+    plugin_version = "0.3.19"
     plugin_author = "lutian98"
     author_url = ""
     plugin_config_prefix = "brush2pan_"
@@ -245,11 +245,11 @@ class Brush2Pan(_PluginBase):
         return {"imdb": imdb, "index_ready": bad is not None, "adult": bad,
                 "reason": "索引未就绪" if bad is None else ("成人影片（IMDb Adult）" if bad else "非成人")}
 
-    def api_audiomux(self, good: str = "", bad: str = "", out: str = "", default_track: str = "first"):
+    def api_audiomux(self, good: str = "", bad: str = "", out: str = "", default_track: str = "first", duration: int = 0):
         """临时诊断接口：把 good 文件的音轨0 与 bad 文件的音轨0 合成到一个 MKV，用于验证多音轨/default 播放行为。"""
         if not good or not bad or ".." in good + bad or ".." in (out or ""):
             return {"ok": False, "error": "good/bad 必须是刷流内相对路径"}
-        base = os.path.join(self._save_prefix, "_音频测试")
+        base = os.path.join(self._save_prefix, "_audiotest")
         os.makedirs(base, exist_ok=True)
         src1 = self._video_path({"name": good})
         src2 = self._video_path({"name": bad})
@@ -260,7 +260,10 @@ class Brush2Pan(_PluginBase):
         ffmpeg = shutil.which("ffmpeg") or "/usr/local/bin/ffmpeg"
         disp = ["-disposition:a:0", "default", "-disposition:a:1", "0"] if default_track == "first" else                ["-disposition:a:0", "0", "-disposition:a:1", "default"]
         cmd = [ffmpeg, "-y", "-i", src1, "-i", src2, "-map", "0:v:0", "-map", "0:a:0", "-map", "1:a:0",
-               "-c", "copy"] + disp + [outp]
+               "-c", "copy"]
+        if int(duration or 0) > 0:
+            cmd += ["-t", str(int(duration))]
+        cmd += disp + [outp]
         try:
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
         except Exception as e:  # noqa: BLE001
