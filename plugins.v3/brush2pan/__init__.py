@@ -38,7 +38,7 @@ VIDEO_EXT = {".mkv", ".mp4", ".avi", ".ts", ".mov", ".wmv", ".flv", ".webm", ".m
 BAD_GENRE_IDS = {27: "恐怖", 53: "惊悚"}
 IMDB_DATASET_URL = "https://datasets.imdbws.com/title.basics.tsv.gz"
 IMDB_MAX_AGE_DAYS = 7
-AUDIO_BAD = re.compile(r"(?i)5\.1")
+AUDIO_BAD = re.compile(r"(?i)(5\.1|truehd|dolby\s*truehd)")
 RETRY_DELAYS = (300, 900, 3600)
 MAX_RETRY = 3
 COPY_TIMEOUT = 7200
@@ -60,12 +60,6 @@ STRIP_TITLE_TOKENS = {"usa", "cc", "2in1", "hybrid", "remastered", "uncut", "ima
                       "dubbed", "subbed", "dual", "multi", "2audios", "hc"}
 EP_TOKEN_RE = re.compile(r"(?i)^s(\d{2,3})(e\d{1,3})?$")
 YEAR_RE = re.compile(r"(?<![0-9])((?:19|20)\d{2})(?![0-9])")
-AUDIO_BAD = re.compile(r"(?i)5\.1")
-RETRY_DELAYS = (300, 900, 3600)
-MAX_RETRY = 3
-COPY_TIMEOUT = 7200
-
-
 def _tokens(name: str) -> list:
     return [t for t in TOKEN_SPLIT_RE.split(name or "") if t]
 
@@ -112,7 +106,7 @@ class Brush2Pan(_PluginBase):
     plugin_name = "刷流直传 115"
     plugin_desc = "刷流完成的影片按口径筛选后，经 CD2 直传 115 固定目录并按 TMDB 重命名"
     plugin_icon = "brush2pan.png"
-    plugin_version = "0.3.11"
+    plugin_version = "0.3.12"
     plugin_author = "lutian98"
     author_url = ""
     plugin_config_prefix = "brush2pan_"
@@ -1009,8 +1003,11 @@ class Brush2Pan(_PluginBase):
             channels = int(st.get("channels") or 0)
         except Exception:
             channels = 0
-        codec = st.get("codec_name") or "?"
+        codec = str(st.get("codec_name") or "?")
+        profile = str(st.get("profile") or "")
         tag = f"{codec} {channels}ch" if channels else codec
+        if codec.lower() == "truehd" or "truehd" in profile.lower():
+            return False, f"实际音轨 TrueHD（{profile or codec}，播放兼容性差，口径：排除）"
         if channels == 6:
             return False, f"实际音轨 5.1（{tag}，口径：排除）"
         if channels == 0:
@@ -1028,7 +1025,7 @@ class Brush2Pan(_PluginBase):
         if not re.search(r"(?i)(1080p|2160p)", name):
             return False, "非 1080p/2160p"
         if AUDIO_BAD.search(name):
-            return False, "5.1 声道（口径：排除）"
+            return False, "5.1/TrueHD 音轨（播放兼容性口径：排除）"
         if size_mb < self._min_size_mb:
             return False, f"文件过小 {size_mb:.0f}MB < {self._min_size_mb}MB"
         if "sample" in nl:
