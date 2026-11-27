@@ -38,7 +38,7 @@
     "name": "刷流直传 115",
     "description": "刷流完成的影片按口径筛选后，经 CD2 直传 115 固定目录并按 TMDB 重命名。",
     "labels": "刷流,115,文件整理",
-    "version": "0.3.19",
+    "version": "0.3.20",
     "icon": "brush2pan.png",
     "author": "lutian98",
     "level": 1,
@@ -84,7 +84,8 @@
       "v0.3.16": "修复 /audiocheck 绝对路径探测：_audio_check 未使用 _video_path 导致 rc=1。",
       "v0.3.17": "音轨判据改为 default 轨优先（无 default 标记退回第一条），修复「第一条正常、第二条才是默认坏轨」误放行；临时增加 api_audiomux 用于合成多音轨测试样本。",
       "v0.3.18": "把临时合成接口 /audiomux 注册进 get_api（0.3.17 只加了方法未注册导致 404）；音轨检测描述同步为 default 轨优先 / TrueHD/DTS 排除。",
-      "v0.3.19": "临时合成接口增加 duration（只合成前 N 秒）与 ASCII 临时目录 _audiotest，便于生成小体积多音轨测试样本。"
+      "v0.3.19": "临时合成接口增加 duration（只合成前 N 秒）与 ASCII 临时目录 _audiotest，便于生成小体积多音轨测试样本。",
+      "v0.3.20": "优化批次：移除临时 /audiomux 接口；ffprobe/中字/TMDB 结果缓存（同一文件/影片只探测一次）；state_v2 自动清理已删除种子的历史台账（1 天保护期）；单轮扫描 50 秒预算；等待日志降噪；IMDb 初始化移出条件 try（避免 min_size 解析失败时 _imdb_lock 缺失）。"
     }
   }
 }
