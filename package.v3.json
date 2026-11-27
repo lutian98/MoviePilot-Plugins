@@ -38,7 +38,7 @@
     "name": "刷流直传 115",
     "description": "刷流完成的影片按口径筛选后，经 CD2 直传 115 固定目录并按 TMDB 重命名。",
     "labels": "刷流,115,文件整理",
-    "version": "0.3.12",
+    "version": "0.3.13",
     "icon": "brush2pan.png",
     "author": "lutian98",
     "level": 1,
@@ -77,7 +77,8 @@
       "v0.3.9": "重试计数跨轮保留：临时失败重试 3 次后转 review，避免无限重试。",
       "v0.3.10": "TMDB 精确匹配同时比对 original_title（zh-CN 搜索返回中文标题导致英文片名无法命中）。",
       "v0.3.11": "诊断增强：/audiocheck?detail=1 返回完整音视频流信息（codec/profile/channels/默认轨/DoVi 字段）。",
-      "v0.3.12": "音轨口径补充：文件名含 TrueHD/Dolby TrueHD 或实际默认音轨 codec=truehd（含 TrueHD+Atmos）一律拒绝；DD+/DTS 等有损 7.1 继续放行（实测诺丁山 DD+7.1 正常、忘却之岛 TrueHD+Atmos 弹音频错误）。"
+      "v0.3.12": "音轨口径补充：文件名含 TrueHD/Dolby TrueHD 或实际默认音轨 codec=truehd（含 TrueHD+Atmos）一律拒绝；DD+/DTS 等有损 7.1 继续放行（实测诺丁山 DD+7.1 正常、忘却之岛 TrueHD+Atmos 弹音频错误）。",
+      "v0.3.13": "音轨规则按实测修正：5.1（AC3/E-AC3）可正常播放 → 放行；DTS 5.1 与 TrueHD+Atmos 实测报错 → 按编码排除（truehd/dts/atmos），不再按 5.1 声道一刀切。"
     }
   }
 }
