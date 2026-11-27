@@ -106,7 +106,7 @@ class Brush2Pan(_PluginBase):
     plugin_name = "刷流直传 115"
     plugin_desc = "刷流完成的影片按口径筛选后，经 CD2 直传 115 固定目录并按 TMDB 重命名"
     plugin_icon = "brush2pan.png"
-    plugin_version = "0.3.15"
+    plugin_version = "0.3.16"
     plugin_author = "lutian98"
     author_url = ""
     plugin_config_prefix = "brush2pan_"
@@ -250,8 +250,7 @@ class Brush2Pan(_PluginBase):
             return {"ok": False, "error": "需要 name（种子内相对路径）或 path（/downloads/ 绝对路径）"}
         video = {"name": target, "size": 0}
         ok, reason = self._audio_check(video)
-        out = {"ok": ok, "reason": reason,
-               "path": os.path.join(self._save_prefix, name.lstrip("/"))}
+        out = {"ok": ok, "reason": reason, "path": target}
         if int(detail or 0):
             out["streams"] = self._stream_detail(video)
         return out
@@ -995,8 +994,7 @@ class Brush2Pan(_PluginBase):
 
     def _audio_check(self, video: dict) -> Tuple[bool, str]:
         """读实际音频流：默认（第一条）音轨 6 声道 = 5.1 → 拒绝。与中字检测同样走 ffprobe。"""
-        name = video.get("name", "")
-        path = os.path.join(self._save_prefix, name.lstrip("/"))
+        path = self._video_path(video)
         ffprobe = shutil.which("ffprobe") or "/usr/local/bin/ffprobe"
         try:
             r = subprocess.run(
