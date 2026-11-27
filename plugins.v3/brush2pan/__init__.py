@@ -106,7 +106,7 @@ class Brush2Pan(_PluginBase):
     plugin_name = "刷流直传 115"
     plugin_desc = "刷流完成的影片按口径筛选后，经 CD2 直传 115 固定目录并按 TMDB 重命名"
     plugin_icon = "brush2pan.png"
-    plugin_version = "0.3.14"
+    plugin_version = "0.3.15"
     plugin_author = "lutian98"
     author_url = ""
     plugin_config_prefix = "brush2pan_"
@@ -239,10 +239,16 @@ class Brush2Pan(_PluginBase):
         return {"imdb": imdb, "index_ready": bad is not None, "adult": bad,
                 "reason": "索引未就绪" if bad is None else ("成人影片（IMDb Adult）" if bad else "非成人")}
 
-    def api_audiocheck(self, name: str = "", detail: int = 0):
-        if not name or ".." in name:
-            return {"ok": False, "error": "name 必须是种子内相对路径"}
-        video = {"name": name, "size": 0}
+    def api_audiocheck(self, name: str = "", detail: int = 0, path: str = ""):
+        if path:
+            if ".." in path or not path.startswith("/downloads/"):
+                return {"ok": False, "error": "path 必须是容器内 /downloads/ 下的绝对路径"}
+            target = path
+        elif name and ".." not in name:
+            target = os.path.join(self._save_prefix, name.lstrip("/"))
+        else:
+            return {"ok": False, "error": "需要 name（种子内相对路径）或 path（/downloads/ 绝对路径）"}
+        video = {"name": target, "size": 0}
         ok, reason = self._audio_check(video)
         out = {"ok": ok, "reason": reason,
                "path": os.path.join(self._save_prefix, name.lstrip("/"))}
@@ -960,8 +966,14 @@ class Brush2Pan(_PluginBase):
             return False, "图形字幕（PGS）无中文标记，非中文片"
         return False, f"内嵌字幕 {len(streams)} 条，但未检出中文"
 
+    def _video_path(self, video: dict) -> str:
+        name = video.get("name") or ""
+        if os.path.isabs(name):
+            return name
+        return os.path.join(self._save_prefix, name.lstrip("/"))
+
     def _stream_detail(self, video: dict) -> dict:
-        path = os.path.join(self._save_prefix, (video.get("name") or "").lstrip("/"))
+        path = self._video_path(video)
         ffprobe = shutil.which("ffprobe") or "/usr/local/bin/ffprobe"
         out = {"audio": [], "video": []}
         try:
