@@ -95,5 +95,19 @@
       "v0.3.27": "中字检测性能修正：只抽取「语言/标题标中文」的文本字幕验证；无标记文本最多抽 2 条，图形字幕只看标记；单次抽取超时 30s，避免多字幕大文件把检测拖超时。",
       "v0.3.28": "中字检测性能再优化：抽字幕只取前 60 秒时间范围（-t 60），避免大文件/多字幕轨全量扫描导致一次检测 90 秒以上。"
     }
+  },
+  "BrushFlow": {
+    "name": "刷流直传 115（一体版）",
+    "description": "站点刷流 + 下载前预筛 + 下载后精判 + CD2 直传 115，单个插件完成；fork 自 jxxghp/MoviePilot-Plugins 站点刷流 6.1.7（GPLv3）。",
+    "labels": "站点,刷流,115,文件整理",
+    "version": "6.2.0",
+    "icon": "brush-flow.png",
+    "author": "jxxghp,InfinityPacer,Seed680,lutian98",
+    "level": 2,
+    "release": true,
+    "system_version": ">=3.0.0",
+    "history": {
+      "v6.2.0": "1+1 合并版：保留 BrushFlow 全部刷流/任务/删种/通知/UI 功能；新增下载前预筛、随机兜底、下载后精判、CD2 直传 115、删除保护、上传设置 API。prefilter/random 默认关闭，upload.dry_run 默认开启，灰度后再开。"
+    }
   }
 }
