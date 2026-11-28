@@ -439,6 +439,20 @@ class BrushFlow(_PluginBase):
                 "auth": "bear",
                 "summary": "直传上传状态",
             },
+            {
+                "path": "/upload/selftest",
+                "endpoint": self.get_upload_selftest,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "CD2 连通性自检",
+            },
+            {
+                "path": "/upload/records",
+                "endpoint": self.get_upload_records,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "直传上传台账",
+            },
         ]
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
@@ -607,6 +621,41 @@ class BrushFlow(_PluginBase):
             "prefilter": self._prefilter_cfg,
             "random_fallback": self._random_cfg,
         })
+
+    def get_upload_selftest(self) -> schemas.Response:
+        """检查上传引擎的 CD2 grpcurl/Token/挂载点。"""
+        engine = getattr(self, "_upload_engine", None)
+        if not engine:
+            return schemas.Response(success=False, message="上传引擎未初始化")
+        try:
+            data = engine._cd2("GetMountPoints", timeout=30)
+            mounts = data.get("mountPoints") or []
+            return schemas.Response(success=True, data={
+                "grpc": engine._cd2_grpc,
+                "mounts": [{"name": m.get("name"), "mountPoint": m.get("mountPoint"),
+                            "sourceDir": m.get("sourceDir"), "isMounted": m.get("isMounted")} for m in mounts],
+            })
+        except Exception as err:
+            return schemas.Response(success=False, message=str(err)[:500])
+
+    def get_upload_records(self, limit: int = Query(50, ge=1, le=200)) -> schemas.Response:
+        """返回直传台账最近记录，用于核对精判/上传状态。"""
+        engine = getattr(self, "_upload_engine", None)
+        if not engine:
+            return schemas.Response(success=False, message="上传引擎未初始化")
+        state = engine.get_data("state_v2") or {}
+        rows = []
+        for h, rec in state.items():
+            if not isinstance(rec, dict):
+                continue
+            rows.append({
+                "hash": h, "name": rec.get("name"), "status": rec.get("status"),
+                "reason": rec.get("reason"), "title": rec.get("title"),
+                "target_name": rec.get("target_name"), "dst_dir": rec.get("dst_dir"),
+                "attempts": rec.get("attempts"), "ts": rec.get("ts"),
+            })
+        rows.sort(key=lambda x: x.get("ts") or 0, reverse=True)
+        return schemas.Response(success=True, data=rows[:limit])
 
     def get_upload_status(self) -> schemas.Response:
         """返回上传引擎当前状态摘要。"""
