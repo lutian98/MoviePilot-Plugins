@@ -108,7 +108,7 @@ class Brush2Pan(_PluginBase):
     plugin_name = "刷流直传 115"
     plugin_desc = "刷流完成的影片按口径筛选后，经 CD2 直传 115 固定目录并按 TMDB 重命名"
     plugin_icon = "brush2pan.png"
-    plugin_version = "0.3.26"
+    plugin_version = "0.3.27"
     plugin_author = "lutian98"
     author_url = ""
     plugin_config_prefix = "brush2pan_"
@@ -291,6 +291,7 @@ class Brush2Pan(_PluginBase):
         if int(detail or 0):
             path = out["path"]
             rows = []
+            sampled = 0
             for st in self._sub_streams(path):
                 tags = st.get("tags") or {}
                 disp = st.get("disposition") or {}
@@ -298,7 +299,8 @@ class Brush2Pan(_PluginBase):
                        "lang": tags.get("language"), "title": tags.get("title"),
                        "forced": bool(disp.get("forced") or 0),
                        "default": bool(disp.get("default") or 0)}
-                if st.get("codec_name") in {"subrip", "ass", "ssa", "webvtt", "mov_text", "srt", "text"} and isinstance(st.get("index"), int):
+                if st.get("codec_name") in {"subrip", "ass", "ssa", "webvtt", "mov_text", "srt", "text"} and isinstance(st.get("index"), int) and sampled < 3:
+                    sampled += 1
                     sample = self._sub_text_sample(path, st.get("index"))
                     row["cjk_chars"] = len(re.findall(r"[\u4e00-\u9fff]", sample or ""))
                     row["sample"] = (sample or "")[:120].replace("\n", " ")
@@ -1044,7 +1046,7 @@ class Brush2Pan(_PluginBase):
         try:
             r = subprocess.run([ffmpeg, "-v", "quiet", "-i", path,
                                 "-map", f"0:{stream_index}", "-f", "srt", "-"],
-                               capture_output=True, timeout=90)
+                               capture_output=True, timeout=30)
         except Exception:
             return ""
         raw = r.stdout or b""
@@ -1093,37 +1095,46 @@ class Brush2Pan(_PluginBase):
         text_codecs = {"subrip", "ass", "ssa", "webvtt", "mov_text", "srt", "text"}
         image_codecs = {"hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle", "xsub"}
         forced_cjk = False
-        untagged_text_checked = 0
-        for st in streams:
+        def _meta(st):
             tags = st.get("tags") or {}
             lang = str(tags.get("language") or "").lower()
             title = str(tags.get("title") or "")
             disp = st.get("disposition") or {}
             forced = bool(disp.get("forced") or 0)
             codec = st.get("codec_name") or ""
-            tagged_chi = (lang in ("chi", "zho", "zh", "cmn", "yue", "chs", "cht") or
-                          bool(re.search(r"(中|简|繁|CHS|CHT|Chinese)", title, re.I)))
+            tagged = (lang in ("chi", "zho", "zh", "cmn", "yue", "chs", "cht") or
+                      bool(re.search(r"(中|简|繁|CHS|CHT|Chinese)", title, re.I)))
+            return lang, title, forced, codec, tagged
+        # 第一优先：语言/标题标了中文的文本字幕；其次才抽 1~2 条无语言标记文本字幕
+        text_streams = [st for st in streams if (st.get("codec_name") or "") in text_codecs]
+        tagged_text = [st for st in text_streams if _meta(st)[4]]
+        untagged_text = [st for st in text_streams if not _meta(st)[4]]
+        for st in tagged_text:
+            lang, title, forced, codec, _ = _meta(st)
             idx = st.get("index")
-            if codec in text_codecs:
-                sample = self._sub_text_sample(path, idx) if isinstance(idx, int) else ""
-                has_cjk = bool(re.search(r"[\u4e00-\u9fff]{2,}", sample or ""))
-                if tagged_chi and has_cjk:
-                    if forced:
-                        forced_cjk = True
-                        continue
-                    return True, f"内嵌文本中字 {lang or title or codec}"
-                if (not tagged_chi) and has_cjk and untagged_text_checked < 2:
-                    untagged_text_checked += 1
-                    if forced:
-                        forced_cjk = True
-                        continue
-                    return True, f"内嵌文本字幕含中文（{codec}）"
-            elif codec in image_codecs:
-                if tagged_chi:
-                    if forced:
-                        forced_cjk = True
-                        continue
-                    return True, f"内嵌图形中字 {lang or title or codec}"
+            sample = self._sub_text_sample(path, idx) if isinstance(idx, int) else ""
+            has_cjk = bool(re.search(r"[\u4e00-\u9fff]{2,}", sample or ""))
+            if has_cjk:
+                if forced:
+                    forced_cjk = True
+                    continue
+                return True, f"内嵌文本中字 {lang or title or codec}"
+        for st in untagged_text[:2]:
+            lang, title, forced, codec, _ = _meta(st)
+            idx = st.get("index")
+            sample = self._sub_text_sample(path, idx) if isinstance(idx, int) else ""
+            if re.search(r"[\u4e00-\u9fff]{2,}", sample or ""):
+                if forced:
+                    forced_cjk = True
+                    continue
+                return True, f"内嵌文本字幕含中文（{codec}）"
+        for st in streams:
+            lang, title, forced, codec, tagged = _meta(st)
+            if codec in image_codecs and tagged:
+                if forced:
+                    forced_cjk = True
+                    continue
+                return True, f"内嵌图形中字 {lang or title or codec}"
         if forced_cjk:
             return False, "仅有强制/特效字幕（非完整中字）"
         return False, f"内嵌字幕 {len(streams)} 条，但未检出中文"
