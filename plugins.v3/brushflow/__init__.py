@@ -224,7 +224,7 @@ class BrushFlow(_PluginBase):
     plugin_name = "刷流直传 115（一体版）"
     plugin_desc = "站点刷流 + 下载前预筛 + 下载后精判 + CD2 直传 115，一个插件完成。"
     plugin_icon = "brush-flow.png"
-    plugin_version = "6.2.0"
+    plugin_version = "6.2.1"
     plugin_author = "jxxghp,InfinityPacer,Seed680,lutian98"
     author_url = "https://github.com/InfinityPacer"
     plugin_config_prefix = "brushflow_"
