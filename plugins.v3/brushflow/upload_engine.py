@@ -125,6 +125,7 @@ class UploadEngine:
         self._probe_cache = {}
         self._tmdb_cache = {}
         self._retry_attempts = 0
+        self._downloader_helper = DownloaderHelper()
         self._tmdb_key = str(cfg.get("tmdb_key") or getattr(settings, "TMDB_API_KEY", "") or "")
         self._require_chs = bool(cfg.get("require_chs", True))
         try:
