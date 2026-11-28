@@ -224,7 +224,7 @@ class BrushFlow(_PluginBase):
     plugin_name = "刷流直传 115（一体版）"
     plugin_desc = "站点刷流 + 下载前预筛 + 下载后精判 + CD2 直传 115，一个插件完成。"
     plugin_icon = "brush-flow.png"
-    plugin_version = "6.2.2"
+    plugin_version = "6.2.3"
     plugin_author = "jxxghp,InfinityPacer,Seed680,lutian98"
     author_url = "https://github.com/InfinityPacer"
     plugin_config_prefix = "brushflow_"
@@ -453,6 +453,13 @@ class BrushFlow(_PluginBase):
                 "auth": "bear",
                 "summary": "直传上传台账",
             },
+            {
+                "path": "/upload/retry",
+                "endpoint": self.retry_upload_record,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "重试单条直传台账",
+            },
         ]
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
@@ -621,6 +628,19 @@ class BrushFlow(_PluginBase):
             "prefilter": self._prefilter_cfg,
             "random_fallback": self._random_cfg,
         })
+
+    def retry_upload_record(self, payload: dict = Body(...)) -> schemas.Response:
+        """删除指定 hash 的直传台账，让下一轮扫描按规则重新判定。"""
+        engine = getattr(self, "_upload_engine", None)
+        if not engine:
+            return schemas.Response(success=False, message="上传引擎未初始化")
+        target = str(payload.get("hash") or "")
+        state = engine.get_data("state_v2") or {}
+        if not target or target not in state:
+            return schemas.Response(success=False, message="台账中不存在该 hash")
+        old = state.pop(target)
+        engine.save_data("state_v2", state)
+        return schemas.Response(success=True, data={"removed": old})
 
     def get_upload_selftest(self) -> schemas.Response:
         """检查上传引擎的 CD2 grpcurl/Token/挂载点。"""
