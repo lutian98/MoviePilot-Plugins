@@ -360,6 +360,16 @@ class UploadEngine:
     def _imdb_dir(self):
         return self.get_data_path() / "imdb"
 
+    def _imdb_dir(self):
+        """优先复用旧 Brush2Pan 插件已下载的 IMDb 数据集，避免重复 221MB 下载。"""
+        legacy = Path("/config/plugins/Brush2Pan/imdb")
+        try:
+            if legacy.exists():
+                return legacy
+        except Exception:
+            pass
+        return self.get_data_path() / "imdb"
+
     def _imdb_status(self) -> dict:
         d = self._imdb_dir()
         meta = {}
