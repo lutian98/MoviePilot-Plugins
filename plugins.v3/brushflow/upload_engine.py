@@ -978,6 +978,8 @@ class UploadEngine:
                 logger.info("刷流直传：本轮扫描超过 50 秒，剩余种子下一轮继续")
                 break
             try:
+                if self._since and float(getattr(t, "added_on", 0) or 0) < self._since:
+                    continue
                 self._process_torrent(t, state, client)
             except Exception as e:  # noqa: BLE001
                 h = getattr(t, "hash", "")
