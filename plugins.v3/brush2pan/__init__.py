@@ -108,7 +108,7 @@ class Brush2Pan(_PluginBase):
     plugin_name = "刷流直传 115"
     plugin_desc = "刷流完成的影片按口径筛选后，经 CD2 直传 115 固定目录并按 TMDB 重命名"
     plugin_icon = "brush2pan.png"
-    plugin_version = "0.3.23"
+    plugin_version = "0.3.24"
     plugin_author = "lutian98"
     author_url = ""
     plugin_config_prefix = "brush2pan_"
@@ -705,6 +705,7 @@ class Brush2Pan(_PluginBase):
         if year:
             raw = re.sub(rf"(?<!\d){year}(?!\d)", " ", raw)
         raw = re.sub(r"(?i)\b(?:rerip|repack|proper|limited|internal|readnfo|diy)\b", " ", raw)
+        raw = re.sub(r"\b(?:TWN|HKG|USA|GER|FRA|JPN|KOR|ITA|ESP|CAN|AUS|UK)\b", " ", raw)
         raw = re.sub(r"\s+", " ", raw).strip(" -_")
         if raw:
             variants.append(raw)
@@ -745,6 +746,14 @@ class Brush2Pan(_PluginBase):
         for v in list(extra_variants or []) + self._title_variants(title) + [title]:
             if v and v not in candidates:
                 candidates.append(v)
+        # 去掉尾部多余 token（地区/版本/组名），提升裸标题命中率
+        for v in list(candidates):
+            toks = v.split()
+            for cut in (1, 2):
+                if len(toks) - cut >= 2:
+                    cand = " ".join(toks[:-cut])
+                    if cand not in candidates:
+                        candidates.append(cand)
         for variant in candidates:
             result = self._tmdb_search_one(variant, year, is_tv)
             if result:
