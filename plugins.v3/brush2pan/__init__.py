@@ -108,7 +108,7 @@ class Brush2Pan(_PluginBase):
     plugin_name = "刷流直传 115"
     plugin_desc = "刷流完成的影片按口径筛选后，经 CD2 直传 115 固定目录并按 TMDB 重命名"
     plugin_icon = "brush2pan.png"
-    plugin_version = "0.3.25"
+    plugin_version = "0.3.26"
     plugin_author = "lutian98"
     author_url = ""
     plugin_config_prefix = "brush2pan_"
@@ -282,12 +282,29 @@ class Brush2Pan(_PluginBase):
             out["streams"] = self._stream_detail(video)
         return out
 
-    def api_subcheck(self, name: str = ""):
+    def api_subcheck(self, name: str = "", detail: int = 0):
         if not name or ".." in name:
             return {"ok": False, "error": "name 必须是种子内相对路径"}
         video = {"name": name, "size": 0}
         ok, reason = self._has_chs(video, [], None)
-        return {"ok": ok, "reason": reason, "path": os.path.join(self._save_prefix, name.lstrip("/"))}
+        out = {"ok": ok, "reason": reason, "path": os.path.join(self._save_prefix, name.lstrip("/"))}
+        if int(detail or 0):
+            path = out["path"]
+            rows = []
+            for st in self._sub_streams(path):
+                tags = st.get("tags") or {}
+                disp = st.get("disposition") or {}
+                row = {"index": st.get("index"), "codec": st.get("codec_name"),
+                       "lang": tags.get("language"), "title": tags.get("title"),
+                       "forced": bool(disp.get("forced") or 0),
+                       "default": bool(disp.get("default") or 0)}
+                if st.get("codec_name") in {"subrip", "ass", "ssa", "webvtt", "mov_text", "srt", "text"} and isinstance(st.get("index"), int):
+                    sample = self._sub_text_sample(path, st.get("index"))
+                    row["cjk_chars"] = len(re.findall(r"[\u4e00-\u9fff]", sample or ""))
+                    row["sample"] = (sample or "")[:120].replace("\n", " ")
+                rows.append(row)
+            out["substreams"] = rows
+        return out
 
     def api_selftest(self):
         if not self._cd2_token:
@@ -1021,58 +1038,94 @@ class Brush2Pan(_PluginBase):
             cache[path] = result
         return result
 
-    def _has_chs(self, video: dict, files: List[Any], meta: Optional[dict] = None) -> Tuple[bool, str]:
-        """判断是否含中字：外挂字幕（读文本）→ 文件名标注 → 内嵌流（标签/抽文本/中文片兜底）。"""
-        name = video.get("name", "")
-        path = os.path.join(self._save_prefix, name.lstrip("/"))
-        for f in files:
-            fname = getattr(f, "name", "")
-            if os.path.splitext(fname)[1].lower() in self.SUB_EXT:
-                try:
-                    blob = open(os.path.join(self._save_prefix, fname.lstrip("/")), "rb").read(65536)
-                    if self._cjk(blob.decode("utf-8", "ignore")):
-                        return True, f"外挂中文字幕 {os.path.basename(fname)}"
-                except Exception:
-                    pass
-        if re.search(r"(中字|中文字幕|简繁|简中|繁中|简体|繁体|CHS|CHT|Chinese)", name, re.I):
-            return True, "文件名标注中字"
+    def _sub_text_sample(self, path: str, stream_index: int) -> str:
+        """从指定字幕流抽文本（srt），用于判断是否真的含中文。"""
+        ffmpeg = shutil.which("ffmpeg") or "/usr/local/bin/ffmpeg"
+        try:
+            r = subprocess.run([ffmpeg, "-v", "quiet", "-i", path,
+                                "-map", f"0:{stream_index}", "-f", "srt", "-"],
+                               capture_output=True, timeout=90)
+        except Exception:
+            return ""
+        raw = r.stdout or b""
+        for enc in ("utf-8", "utf-16", "gbk"):
+            try:
+                txt = raw.decode(enc, "ignore")
+            except Exception:
+                continue
+            if txt.strip():
+                return txt[:200000]
+        return ""
+
+    def _sub_streams(self, path: str) -> List[dict]:
         ffprobe = shutil.which("ffprobe") or "/usr/local/bin/ffprobe"
         try:
             r = subprocess.run(
                 [ffprobe, "-v", "quiet", "-print_format", "json", "-show_streams",
                  "-select_streams", "s", path],
                 capture_output=True, text=True, timeout=60)
-            streams = json.loads(r.stdout or "{}").get("streams", [])
-        except Exception as e:  # noqa: BLE001
-            return False, f"ffprobe 执行失败: {e}"
+            return json.loads(r.stdout or "{}").get("streams", []) or []
+        except Exception:
+            return []
+
+    def _has_chs(self, video: dict, files: List[Any], meta: Optional[dict] = None) -> Tuple[bool, str]:
+        """判断是否含中字：外挂字幕（解码后验中文）→ 文件名标注 → 内嵌流逐条验内容。"""
+        name = video.get("name", "")
+        path = self._video_path(video)
+        for f in files:
+            fname = getattr(f, "name", "")
+            if os.path.splitext(fname)[1].lower() in self.SUB_EXT:
+                try:
+                    blob = open(os.path.join(self._save_prefix, fname.lstrip("/")), "rb").read(262144)
+                except Exception:
+                    continue
+                for enc in ("utf-8", "utf-16", "gbk"):
+                    try:
+                        if self._cjk(blob.decode(enc, "ignore")):
+                            return True, f"外挂中文字幕 {os.path.basename(fname)}"
+                    except Exception:
+                        continue
+        if re.search(r"(中字|中文字幕|简繁|简中|繁中|简体|繁体|CHS|CHT|Chinese)", name, re.I):
+            return True, "文件名标注中字"
+        streams = self._sub_streams(path)
         if not streams:
             return False, "未发现中文字幕（无外挂、无内嵌字幕流）"
         text_codecs = {"subrip", "ass", "ssa", "webvtt", "mov_text", "srt", "text"}
         image_codecs = {"hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle", "xsub"}
+        forced_cjk = False
+        untagged_text_checked = 0
         for st in streams:
             tags = st.get("tags") or {}
             lang = str(tags.get("language") or "").lower()
             title = str(tags.get("title") or "")
-            if lang in ("chi", "zho", "zh", "cmn", "yue", "chs", "cht") or \
-                    re.search(r"(中|简|繁|CHS|CHT|Chinese)", title, re.I):
-                return True, f"内嵌字幕 {lang or title or st.get('codec_name','')}"
-        # 文本字幕：抽第一条转 srt，看是否含 CJK
-        ffmpeg = shutil.which("ffmpeg") or "/usr/local/bin/ffmpeg"
-        if any((st.get("codec_name") in text_codecs) for st in streams):
-            try:
-                r = subprocess.run([ffmpeg, "-v", "quiet", "-i", path,
-                                    "-map", "0:s:0", "-f", "srt", "-"],
-                                   capture_output=True, text=True, timeout=120)
-                if self._cjk(r.stdout[:200000]):
-                    return True, "内嵌文本字幕含中文"
-            except Exception:
-                pass
-        # 图形字幕（PGS 等）无法抽文本：中文片默认有中字
-        if meta and (meta.get("tmdb_lang") in ("zh", "cn", "yue", "cmn")
-                     or self._cjk(meta.get("tmdb_title") or "")):
-            return True, "图形字幕未标注，中文片默认中字"
-        if any(st.get("codec_name") in image_codecs for st in streams):
-            return False, "图形字幕（PGS）无中文标记，非中文片"
+            disp = st.get("disposition") or {}
+            forced = bool(disp.get("forced") or 0)
+            codec = st.get("codec_name") or ""
+            tagged_chi = (lang in ("chi", "zho", "zh", "cmn", "yue", "chs", "cht") or
+                          bool(re.search(r"(中|简|繁|CHS|CHT|Chinese)", title, re.I)))
+            idx = st.get("index")
+            if codec in text_codecs:
+                sample = self._sub_text_sample(path, idx) if isinstance(idx, int) else ""
+                has_cjk = bool(re.search(r"[\u4e00-\u9fff]{2,}", sample or ""))
+                if tagged_chi and has_cjk:
+                    if forced:
+                        forced_cjk = True
+                        continue
+                    return True, f"内嵌文本中字 {lang or title or codec}"
+                if (not tagged_chi) and has_cjk and untagged_text_checked < 2:
+                    untagged_text_checked += 1
+                    if forced:
+                        forced_cjk = True
+                        continue
+                    return True, f"内嵌文本字幕含中文（{codec}）"
+            elif codec in image_codecs:
+                if tagged_chi:
+                    if forced:
+                        forced_cjk = True
+                        continue
+                    return True, f"内嵌图形中字 {lang or title or codec}"
+        if forced_cjk:
+            return False, "仅有强制/特效字幕（非完整中字）"
         return False, f"内嵌字幕 {len(streams)} 条，但未检出中文"
 
     def _video_path(self, video: dict) -> str:
