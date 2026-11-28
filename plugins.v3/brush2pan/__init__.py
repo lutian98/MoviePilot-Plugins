@@ -43,7 +43,7 @@ RETRY_DELAYS = (300, 900, 3600)
 MAX_RETRY = 3
 COPY_TIMEOUT = 7200
 # 规则版本：变更后自动重评历史 review 条目（v2=音轨改为只排 TrueHD/DTS，default 轨判定）
-POLICY_VER = 2
+POLICY_VER = 3
 # token 化的标记识别：按分隔符切 token，避免 "dd"/"dv" 子串误伤片名（Hidden.Figures → Hi）
 TOKEN_SPLIT_RE = re.compile(r"[^0-9A-Za-z\u4e00-\u9fff]+")
 MARKER_TOKENS = {
@@ -108,7 +108,7 @@ class Brush2Pan(_PluginBase):
     plugin_name = "刷流直传 115"
     plugin_desc = "刷流完成的影片按口径筛选后，经 CD2 直传 115 固定目录并按 TMDB 重命名"
     plugin_icon = "brush2pan.png"
-    plugin_version = "0.3.22"
+    plugin_version = "0.3.23"
     plugin_author = "lutian98"
     author_url = ""
     plugin_config_prefix = "brush2pan_"
@@ -303,7 +303,8 @@ class Brush2Pan(_PluginBase):
 
     def api_probe(self, name: str = ""):
         meta = self._parse_release(name)
-        tmdb = self._tmdb_search(meta["cn"] or meta["title"], meta["year"], meta["is_tv"])
+        tmdb = self._tmdb_search(meta["cn"] or meta["title"], meta["year"], meta["is_tv"],
+                                extra_variants=meta.get("variants"))
         out: Dict[str, Any] = {"input": name, "meta": meta,
                                "tmdb": None if not tmdb else {
                                    "id": tmdb.get("id"),
@@ -691,7 +692,30 @@ class Brush2Pan(_PluginBase):
         if not title:
             title = body.strip()
         tv = any(EP_TOKEN_RE.match(t) for t in toks) or bool(re.search(r"(?i)S\d{2,3}(E\d{1,3})?", body))
-        return {"title": cn or title, "year": year, "resolution": res, "is_tv": tv, "cn": cn}
+        # 额外搜索候选：保留标点（+ / : 等）的原始标题，避免 "3.0+1.0" 被拆成 "3 0 1 0"
+        variants = [title]
+        if cn:
+            variants.append(cn)
+        # 保留版本号里的点（3.0+1.0），其余点/下划线转空格
+        raw = re.sub(r"[._]+", " ", re.sub(r"(?<!\d)\.|\.(?!\d)", " ", body).replace("_", " "))
+        raw = re.sub(r"\s+", " ", raw).strip(" -_")
+        m = re.search(r"(?i)\b(?:2160p|1080p|4k|bluray|blu-ray|web-?dl|webrip|hdrip|hdtv|remux|dvdrip|bdrip)\b", raw)
+        if m:
+            raw = raw[:m.start()].strip(" -_")
+        if year:
+            raw = re.sub(rf"(?<!\d){year}(?!\d)", " ", raw)
+        raw = re.sub(r"(?i)\b(?:rerip|repack|proper|limited|internal|readnfo|diy)\b", " ", raw)
+        raw = re.sub(r"\s+", " ", raw).strip(" -_")
+        if raw:
+            variants.append(raw)
+        no_movie = re.sub(r"(?i)\bthe\s+movie\b", " ", raw or title)
+        no_movie = re.sub(r"\s+", " ", no_movie).strip(" -_")
+        if no_movie:
+            variants.append(no_movie)
+        seen = set()
+        variants = [x for x in variants if x and not (x in seen or seen.add(x))]
+        return {"title": cn or title, "year": year, "resolution": res, "is_tv": tv, "cn": cn,
+                "variants": variants}
 
     @staticmethod
     def _title_variants(title: str) -> List[str]:
@@ -706,7 +730,8 @@ class Brush2Pan(_PluginBase):
             out.append(non_cjk)
         return [x for x in out if x]
 
-    def _tmdb_search(self, title: str, year: Optional[int], is_tv: bool) -> Optional[dict]:
+    def _tmdb_search(self, title: str, year: Optional[int], is_tv: bool,
+                     extra_variants: Optional[List[str]] = None) -> Optional[dict]:
         if not self._tmdb_key:
             logger.warning("刷流直传：没有 TMDB key")
             return None
@@ -716,7 +741,11 @@ class Brush2Pan(_PluginBase):
             cache = self._tmdb_cache = {}
         if key in cache:
             return cache[key]
-        for variant in self._title_variants(title) or [title]:
+        candidates: List[str] = []
+        for v in list(extra_variants or []) + self._title_variants(title) + [title]:
+            if v and v not in candidates:
+                candidates.append(v)
+        for variant in candidates:
             result = self._tmdb_search_one(variant, year, is_tv)
             if result:
                 cache[key] = result
@@ -920,21 +949,45 @@ class Brush2Pan(_PluginBase):
                                  timeout=20, proxies=self._proxies())
                 results = r.json().get("results") or []
             want = self._norm_title(title)
-            best = None
+            best = None      # (score, item)
+            fallback = None  # 同年份、搜索排名靠前的结果（标题译名/原名无法直接比对时兜底）
             for item in results:
                 name = item.get("title") or item.get("name") or ""
                 orig = item.get("original_title") or item.get("original_name") or ""
                 date = item.get("release_date") or item.get("first_air_date") or ""
                 ry = int(date[:4]) if date[:4].isdigit() else None
-                exact = self._norm_title(name) == want or (orig and self._norm_title(orig) == want)
-                score = 5 if exact else 0
+                score = 0
+                if want and (self._norm_title(name) == want or (orig and self._norm_title(orig) == want)):
+                    score = 10
+                else:
+                    # 模糊：包含关系（副标题/长标题）或英文词元重叠
+                    for cand in (name, orig):
+                        cn = self._norm_title(cand)
+                        if not cn or not want:
+                            continue
+                        if len(want) >= 6 and (want in cn or cn in want):
+                            ratio = min(len(want), len(cn)) / max(len(want), len(cn))
+                            if ratio >= 0.5:
+                                score = max(score, 6)
+                                break
+                    if score == 0:
+                        qt = set(re.findall(r"[a-z0-9]+", (title or "").lower()))
+                        nt = set(re.findall(r"[a-z0-9]+", (name + " " + orig).lower()))
+                        if qt and nt:
+                            j = len(qt & nt) / len(qt | nt)
+                            if j >= 0.7:
+                                score = 5
                 if year and ry == year:
                     score += 5
                 elif year and ry and abs(ry - year) <= 1:
                     score += 2
-                if exact and (best is None or score > best[0]):
+                if score >= 6 and (best is None or score > best[0]):
                     best = (score, item)
-            return best[1] if best else None
+                if fallback is None and year and ry == year and len((title or "").strip()) >= 6:
+                    fallback = item
+            if best:
+                return best[1]
+            return fallback
         except Exception as e:  # noqa: BLE001
             self._tmdb_transient = True
             logger.warning(f"刷流直传：TMDB 查询失败 {title}: {e}")
@@ -1375,14 +1428,14 @@ class Brush2Pan(_PluginBase):
                         "meta": meta, "ts": time.time()}
             self.save_data("state_v2", state)
             return
-        tmdb = self._tmdb_search(meta["cn"] or meta["title"], meta["year"], meta["is_tv"])
+        tmdb = self._tmdb_search(meta["cn"] or meta["title"], meta["year"], meta["is_tv"],
+                                extra_variants=meta.get("variants"))
         if not tmdb:
             if getattr(self, "_tmdb_transient", False):
                 self._schedule_retry(state, h, name, "TMDB 查询失败（网络/接口）")
             else:
-                state[h] = {"status": "review", "name": name, "reason": "TMDB 未识别",
-                            "meta": meta, "ts": time.time()}
-                logger.info(f"刷流直传：TMDB 未识别 {meta['title']} {meta['year']}")
+                # 不直接永久拒绝：自动重试 3 次（TMDB 索引/译名延迟、搜索偶发失败都可能自愈）
+                self._schedule_retry(state, h, name, "TMDB 未识别（自动重试）")
             self.save_data("state_v2", state)
             return
         genre_ok, genre_reason, genre_detail = self._genre_check(tmdb, meta["is_tv"])
