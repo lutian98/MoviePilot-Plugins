@@ -971,6 +971,17 @@ class UploadEngine:
         except Exception as e:  # noqa: BLE001
             logger.warning(f"刷流直传：列举种子失败: {e}")
             return
+        if self._since:
+            allowed = {
+                getattr(t, "hash", "") for t in torrents
+                if float(getattr(t, "added_on", 0) or 0) >= self._since
+            }
+            stale = [h for h in list(state.keys()) if h not in allowed]
+            if stale:
+                for h in stale:
+                    state.pop(h, None)
+                self.save_data("state_v2", state)
+                logger.info(f"刷流直传：清理时间窗外的历史台账 {len(stale)} 条")
         self._prune_state(state, {getattr(t, "hash", "") for t in torrents})
         started = time.time()
         for t in torrents:
