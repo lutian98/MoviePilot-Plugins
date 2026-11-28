@@ -100,7 +100,7 @@
     "name": "刷流直传 115（一体版）",
     "description": "站点刷流 + 下载前预筛 + 下载后精判 + CD2 直传 115，单个插件完成；fork 自 jxxghp/MoviePilot-Plugins 站点刷流 6.1.7（GPLv3）。",
     "labels": "站点,刷流,115,文件整理",
-    "version": "6.2.2",
+    "version": "6.2.3",
     "icon": "brush-flow.png",
     "author": "jxxghp,InfinityPacer,Seed680,lutian98",
     "level": 2,
@@ -109,7 +109,8 @@
     "history": {
       "v6.2.0": "1+1 合并版：保留 BrushFlow 全部刷流/任务/删种/通知/UI 功能；新增下载前预筛、随机兜底、下载后精判、CD2 直传 115、删除保护、上传设置 API。prefilter/random 默认关闭，upload.dry_run 默认开启，灰度后再开。",
       "v6.2.1": "修复上传引擎下载器初始化；新增 since 时间窗、预筛/随机兜底、删除保护、上传自检/台账 API。",
-      "v6.2.2": "补云端 CD2 proto 文件，修复上传自检/复制路径。"
+      "v6.2.2": "补云端 CD2 proto 文件，修复上传自检/复制路径。",
+      "v6.2.3": "清理时间窗外的历史上传台账，新增 /upload/retry 单条重试。"
     }
   }
 }
